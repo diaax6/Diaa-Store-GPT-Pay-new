@@ -407,6 +407,7 @@ async function runAutoCheckout(checkoutUrl, address) {
   body.append("payment_method_data[billing_details][address][postal_code]", address.zip);
   body.append("expected_amount", expectedAmount);
   body.append("consent[terms_of_service]", "accepted");
+  body.append("return_url", checkoutUrl);
 
   const headers = {
     "Authorization": `Bearer ${pk}`,
