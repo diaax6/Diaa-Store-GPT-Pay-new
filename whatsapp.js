@@ -79,10 +79,20 @@ class WhatsAppOTP extends EventEmitter {
       this.emit("disconnected", reason);
     });
 
-    // Message listener — extract OTP codes
-    this.client.on("message", async (message) => {
+    // Message listener — catch ALL message types
+    const handleMessage = async (message) => {
       const text = message.body || "";
       const from = message.from || "";
+      const type = message.type || "unknown";
+      const isFromMe = message.fromMe || false;
+
+      // Log ALL incoming messages for debugging
+      if (!isFromMe && text) {
+        console.log(`[WhatsApp] 📩 Message from ${from} (type: ${type}): ${text.substring(0, 100)}`);
+      }
+
+      // Skip our own messages
+      if (isFromMe) return;
 
       // Look for 4-6 digit OTP codes
       const otpMatch = text.match(/\b(\d{4,6})\b/);
@@ -95,13 +105,21 @@ class WhatsAppOTP extends EventEmitter {
         };
 
         console.log(`[WhatsApp] 🔑 OTP received from ${from}: ${otp.code}`);
-        this.otpStore.unshift(otp); // newest first
+        this.otpStore.unshift(otp);
 
-        // Keep only last 20 OTPs
         if (this.otpStore.length > 20) this.otpStore.length = 20;
 
         this.emit("otp", otp);
       }
+    };
+
+    // Listen on ALL message events
+    this.client.on("message", handleMessage);
+    this.client.on("message_create", handleMessage);
+
+    // Also log raw events for debugging
+    this.client.on("message_received", (msg) => {
+      console.log(`[WhatsApp] 📬 message_received event from ${msg.from || "?"}`);
     });
 
     // Start the client
