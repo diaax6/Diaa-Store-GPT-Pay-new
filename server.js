@@ -454,137 +454,89 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     console.log(JSON.stringify(domDump, null, 2));
     console.log("[AutoCheckout] === END DUMP ===");
 
+    // Helper: try clicking first matching selector
+    async function tryClick(selectors) {
+      for (const sel of selectors) {
+        try { await page.waitForSelector(sel, { timeout: 3000 }); await page.click(sel); return sel; } catch {}
+      }
+      return null;
+    }
+    // Helper: try typing into first matching selector
+    async function tryType(selectors, value) {
+      for (const sel of selectors) {
+        try {
+          await page.waitForSelector(sel, { timeout: 3000 });
+          await page.click(sel, { clickCount: 3 });
+          await page.type(sel, value, { delay: 30 });
+          return sel;
+        } catch {}
+      }
+      return null;
+    }
+
     // ── Step 3: Fill Name ──
     console.log("[AutoCheckout] Filling name:", address.name);
-    const nameSelectors = ["#billingName", "input[autocomplete='name']", "input[placeholder*='Name' i]", "input[name*='name' i]"];
-    for (const sel of nameSelectors) {
-      const el = await page.$(sel);
-      if (el) {
-        await el.click({ clickCount: 3 });
-        await el.type(address.name, { delay: 30 });
-        console.log("[AutoCheckout] Name filled via:", sel);
-        break;
-      }
-    }
+    const nameSel = await tryType(["#billingName", "input[autocomplete='name']", "input[placeholder*='Name' i]", "input[name*='name' i]"], address.name);
+    console.log("[AutoCheckout] Name:", nameSel || "NOT FOUND");
     await delay(500);
 
-    // ── Step 4: Select Country (native <select>) ──
+    // ── Step 4: Select Country ──
     console.log("[AutoCheckout] Selecting country:", address.country);
-    const countrySelectors = ["#billingCountry", "select[autocomplete='country']", "select[name*='country' i]"];
-    for (const sel of countrySelectors) {
-      const el = await page.$(sel);
-      if (el) {
-        // Use page.select with the country code
-        try {
-          await page.select(sel, address.country);
-          console.log("[AutoCheckout] Country selected via:", sel);
-        } catch {
-          // Fallback: try matching by text
-          await page.evaluate((selector, code) => {
-            const select = document.querySelector(selector);
-            if (!select) return;
-            const opt = Array.from(select.options).find(o => o.value === code || o.text.includes(code));
-            if (opt) { select.value = opt.value; select.dispatchEvent(new Event('change', { bubbles: true })); }
-          }, sel, address.country);
-        }
-        break;
-      }
+    const countrySel = await tryClick(["#billingCountry", "select[autocomplete='country']", "select[name*='country' i]"]);
+    if (countrySel) {
+      try { await page.select(countrySel, address.country); } catch {}
     }
+    console.log("[AutoCheckout] Country:", countrySel || "NOT FOUND");
     await delay(2000);
 
     // ── Step 5: Click "Enter address manually" link ──
-    console.log("[AutoCheckout] Looking for 'Enter address manually' link...");
+    console.log("[AutoCheckout] Looking for 'Enter address manually'...");
     const manualClicked = await page.evaluate(() => {
       const links = document.querySelectorAll("a, button, span, div");
       for (const link of links) {
         const txt = link.textContent?.trim().toLowerCase();
-        if (txt && (txt.includes("enter address manually") || txt.includes("manual") || txt.includes("enter address"))) {
+        if (txt && (txt.includes("enter address manually") || txt.includes("enter address"))) {
           link.click();
           return txt;
         }
       }
       return null;
     });
-    console.log(`[AutoCheckout] Manual address link: ${manualClicked || "NOT FOUND (fields may already be visible)"}`);
+    console.log(`[AutoCheckout] Manual link: ${manualClicked || "NOT FOUND"}`);
     await delay(2000);
     await ss(page, "03_manual_address");
 
     // ── Step 6: Fill Address Line 1 ──
-    console.log("[AutoCheckout] Filling address line 1:", address.addressLine1);
-    const addr1Selectors = ["#billingAddressLine1", "input[autocomplete='address-line1']", "input[placeholder*='Address line 1' i]", "input[placeholder*='Address' i]:not([placeholder*='line 2' i])", "input[name*='addressLine1' i]"];
-    for (const sel of addr1Selectors) {
-      const el = await page.$(sel);
-      if (el) {
-        await el.click({ clickCount: 3 });
-        await el.type(address.addressLine1, { delay: 25 });
-        console.log("[AutoCheckout] Address1 filled via:", sel);
-        break;
-      }
-    }
+    console.log("[AutoCheckout] Filling address:", address.addressLine1);
+    const addr1Sel = await tryType(["#billingAddressLine1", "input[autocomplete='address-line1']", "input[placeholder*='Address line 1' i]", "input[placeholder*='Address' i]", "input[name*='addressLine1' i]"], address.addressLine1);
+    console.log("[AutoCheckout] Address1:", addr1Sel || "NOT FOUND");
     await delay(500);
 
     // ── Step 7: Fill Address Line 2 (optional) ──
     if (address.addressLine2) {
-      console.log("[AutoCheckout] Filling address line 2...");
-      const addr2Selectors = ["#billingAddressLine2", "input[autocomplete='address-line2']", "input[placeholder*='Address line 2' i]"];
-      for (const sel of addr2Selectors) {
-        const el = await page.$(sel);
-        if (el) {
-          await el.click({ clickCount: 3 });
-          await el.type(address.addressLine2, { delay: 25 });
-          break;
-        }
-      }
+      const addr2Sel = await tryType(["#billingAddressLine2", "input[autocomplete='address-line2']", "input[placeholder*='Address line 2' i]"], address.addressLine2);
+      console.log("[AutoCheckout] Address2:", addr2Sel || "NOT FOUND");
       await delay(300);
     }
 
     // ── Step 8: Fill City ──
-    console.log("[AutoCheckout] Filling city:", address.city);
-    const citySelectors = ["#billingLocality", "input[autocomplete='address-level2']", "input[placeholder*='City' i]", "input[name*='city' i]", "input[name*='locality' i]"];
-    for (const sel of citySelectors) {
-      const el = await page.$(sel);
-      if (el) {
-        await el.click({ clickCount: 3 });
-        await el.type(address.city, { delay: 25 });
-        break;
-      }
-    }
+    const citySel = await tryType(["#billingLocality", "input[autocomplete='address-level2']", "input[placeholder*='City' i]", "input[name*='city' i]"], address.city);
+    console.log("[AutoCheckout] City:", citySel || "NOT FOUND");
     await delay(300);
 
     // ── Step 9: Fill ZIP ──
-    console.log("[AutoCheckout] Filling ZIP:", address.zip);
-    const zipSelectors = ["#billingPostal", "input[autocomplete='postal-code']", "input[placeholder*='ZIP' i]", "input[placeholder*='Postal' i]", "input[name*='postal' i]"];
-    for (const sel of zipSelectors) {
-      const el = await page.$(sel);
-      if (el) {
-        await el.click({ clickCount: 3 });
-        await el.type(address.zip, { delay: 25 });
-        break;
-      }
-    }
+    const zipSel = await tryType(["#billingPostal", "input[autocomplete='postal-code']", "input[placeholder*='ZIP' i]", "input[placeholder*='Postal' i]"], address.zip);
+    console.log("[AutoCheckout] ZIP:", zipSel || "NOT FOUND");
     await delay(300);
 
-    // ── Step 10: Select State (native <select>) ──
+    // ── Step 10: Select State ──
     if (address.state) {
       console.log("[AutoCheckout] Selecting state:", address.state);
-      const stateSelectors = ["#billingAdministrativeArea", "select[autocomplete='address-level1']", "select[name*='state' i]", "select[name*='administrativeArea' i]"];
-      for (const sel of stateSelectors) {
-        const el = await page.$(sel);
-        if (el) {
-          try {
-            await page.select(sel, address.state);
-            console.log("[AutoCheckout] State selected via:", sel);
-          } catch {
-            await page.evaluate((selector, code) => {
-              const select = document.querySelector(selector);
-              if (!select) return;
-              const opt = Array.from(select.options).find(o => o.value === code || o.text.includes(code));
-              if (opt) { select.value = opt.value; select.dispatchEvent(new Event('change', { bubbles: true })); }
-            }, sel, address.state);
-          }
-          break;
-        }
+      const stateSel = await tryClick(["#billingAdministrativeArea", "select[autocomplete='address-level1']", "select[name*='state' i]"]);
+      if (stateSel) {
+        try { await page.select(stateSel, address.state); } catch {}
       }
+      console.log("[AutoCheckout] State:", stateSel || "NOT FOUND");
       await delay(500);
     }
 
