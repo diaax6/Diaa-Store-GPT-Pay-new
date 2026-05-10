@@ -41,7 +41,14 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
     body: JSON.stringify({ type: "gopay", country_code: "62", phone_number: phoneNumber }),
   });
 
-  const linkData = await linkRes.json();
+  let linkData;
+  try {
+    const linkText = await linkRes.text();
+    console.log("[GoPay-API] Step 1 raw:", linkText.substring(0, 300));
+    linkData = JSON.parse(linkText);
+  } catch (e) {
+    return { success: false, error: "Step 1 response not JSON (status: " + linkRes.status + ")", step: 1 };
+  }
   console.log("[GoPay-API] Step 1 response:", JSON.stringify(linkData).substring(0, 200));
 
   if (linkData.status_code !== "201" || !linkData.activation_link_url) {
