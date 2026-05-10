@@ -552,16 +552,80 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
 
     // ── Step 11: Handle terms checkbox ──
     console.log("[AutoCheckout] Checking terms checkbox...");
-    await page.evaluate(() => {
+    // First scroll down to make checkbox visible
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await delay(500);
+
+    const checkboxResult = await page.evaluate(() => {
+      let result = [];
+
+      // Strategy 1: Find checkbox input directly
       const checkboxes = document.querySelectorAll("input[type='checkbox']");
-      checkboxes.forEach(cb => { if (!cb.checked) cb.click(); });
-      // Also try clicking checkbox containers/labels
-      const labels = document.querySelectorAll("label, [role='checkbox']");
-      labels.forEach(l => {
-        const cb = l.querySelector("input[type='checkbox']");
-        if (cb && !cb.checked) l.click();
-      });
+      for (const cb of checkboxes) {
+        if (!cb.checked) {
+          cb.click();
+          cb.checked = true;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+          cb.dispatchEvent(new Event('input', { bubbles: true }));
+          result.push("input-click");
+        }
+      }
+
+      // Strategy 2: Find by role='checkbox'
+      const roleCheckboxes = document.querySelectorAll("[role='checkbox']");
+      for (const cb of roleCheckboxes) {
+        if (cb.getAttribute('aria-checked') !== 'true') {
+          cb.click();
+          result.push("role-click");
+        }
+      }
+
+      // Strategy 3: Find the terms text container and click its checkbox/label area
+      const allEls = document.querySelectorAll("div, span, p, label");
+      for (const el of allEls) {
+        const txt = el.textContent?.toLowerCase() || "";
+        if (txt.includes("you'll be charged") || txt.includes("terms of use") || txt.includes("you agree")) {
+          // Find checkbox near this text
+          const parent = el.closest("div, label, section");
+          if (parent) {
+            const cb = parent.querySelector("input[type='checkbox'], [role='checkbox']");
+            if (cb) {
+              cb.click();
+              result.push("terms-parent-click");
+            }
+            // Also try clicking the parent container itself
+            const clickable = parent.querySelector("label, [class*='checkbox'], [class*='Checkbox']");
+            if (clickable) {
+              clickable.click();
+              result.push("terms-label-click");
+            }
+          }
+          break;
+        }
+      }
+
+      // Strategy 4: Click any unchecked checkbox-looking element
+      const checkboxLike = document.querySelectorAll("[class*='checkbox' i], [class*='Checkbox'], [data-testid*='checkbox' i]");
+      for (const el of checkboxLike) {
+        el.click();
+        result.push("class-click");
+      }
+
+      return result.length ? result.join(", ") : "none-found";
     });
+    console.log(`[AutoCheckout] Checkbox strategies used: ${checkboxResult}`);
+
+    // Also try Puppeteer native click on any checkbox
+    try {
+      const cbHandle = await page.$("input[type='checkbox']");
+      if (cbHandle) {
+        const isChecked = await page.evaluate(el => el.checked, cbHandle);
+        if (!isChecked) {
+          await cbHandle.click();
+          console.log("[AutoCheckout] Puppeteer native checkbox click");
+        }
+      }
+    } catch {}
     await delay(1000);
 
     // ── Step 12: Scroll down and Click Subscribe ──
