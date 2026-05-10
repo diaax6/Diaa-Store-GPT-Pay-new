@@ -1,6 +1,8 @@
 // ══════════════════════════════════════════════════════════════════════════
-// Midtrans GoPay Automation — Puppeteer + Network Capture
-// First run captures API endpoints → future runs use Direct API
+// Midtrans GoPay Automation — HYBRID: Direct API + Puppeteer capture
+// Step 1 (Midtrans linking) → Direct API ✅
+// Step 2 (GoPay auth/Hubungkan) → Puppeteer (to capture API)
+// Step 3+ (OTP, PIN) → Puppeteer (until APIs captured)
 // ══════════════════════════════════════════════════════════════════════════
 
 const fs = require("fs");
@@ -8,16 +10,52 @@ const path = require("path");
 
 const CAPTURED_FILE = path.join(__dirname, "midtrans_api.json");
 
-// Check if we already have captured API endpoints
-function hasCapturedAPI() {
-  try {
-    const data = JSON.parse(fs.readFileSync(CAPTURED_FILE, "utf8"));
-    return data && data.endpoints && Object.keys(data.endpoints).length > 0;
-  } catch { return false; }
+// Known Midtrans auth (captured from Snap page)
+const MIDTRANS_AUTH = "Basic TWlkLWNsaWVudC0zVFg4blVhLWZfUmdOcmt5Og==";
+
+// ──────────────────────────────────────────────────────────────────────
+// Step 1: Direct API — Midtrans Linking (NO BROWSER!)
+// ──────────────────────────────────────────────────────────────────────
+
+async function linkGoPay(snapToken, phoneNumber) {
+  console.log("[DirectAPI] Linking GoPay — token:", snapToken, "phone:", phoneNumber);
+
+  const url = `https://app.midtrans.com/snap/v3/accounts/${snapToken}/linking`;
+  const body = JSON.stringify({
+    type: "gopay",
+    country_code: "62",
+    phone_number: phoneNumber,
+  });
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": MIDTRANS_AUTH,
+      "Accept": "application/json",
+      "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+      "Referer": `https://app.midtrans.com/snap/v4/redirection/${snapToken}`,
+      "x-source": "snap",
+      "x-source-version": "2.3.0",
+      "x-source-app-type": "redirection",
+    },
+    body,
+  });
+
+  const data = await res.json();
+  console.log("[DirectAPI] Linking response:", JSON.stringify(data).substring(0, 300));
+
+  return {
+    success: data.status_code === "201",
+    activationUrl: data.activation_link_url,
+    status: data.account_status,
+    raw: data,
+  };
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Main automation function
+// Step 2+: Puppeteer — GoPay auth page + OTP + PIN
+// Captures all API calls from gopayapi.com for future Direct API
 // ──────────────────────────────────────────────────────────────────────
 
 async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
@@ -25,8 +63,43 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
   console.log("[Midtrans] URL:", midtransUrl);
   console.log("[Midtrans] Phone:", phoneNumber);
 
-  // Capture ALL API requests for future Direct API migration
   const capturedAPIs = [];
+  const debugDir = path.join(__dirname, "public", "debug");
+  if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+
+  // Extract snap token from URL
+  const snapToken = midtransUrl.split("/redirection/")[1]?.split("?")[0]?.split("#")[0];
+  if (!snapToken) {
+    return { success: false, error: "Could not extract snap token from URL" };
+  }
+  console.log("[Midtrans] Snap token:", snapToken);
+
+  // ── Step 1: Direct API — Link GoPay (NO BROWSER!) ─────────────────
+  console.log("[Midtrans] Step 1: Direct API linking...");
+  let linkResult;
+  try {
+    linkResult = await linkGoPay(snapToken, phoneNumber);
+    if (!linkResult.success) {
+      return { success: false, error: "Linking failed: " + JSON.stringify(linkResult.raw), capturedAPIs: 0 };
+    }
+    console.log("[Midtrans] Step 1: ✅ Linked! Activation URL:", linkResult.activationUrl);
+
+    capturedAPIs.push({
+      step: 1, method: "POST",
+      url: `https://app.midtrans.com/snap/v3/accounts/${snapToken}/linking`,
+      body: JSON.stringify({ type: "gopay", country_code: "62", phone_number: phoneNumber }),
+      response: { status: 201, body: JSON.stringify(linkResult.raw) },
+    });
+  } catch (err) {
+    return { success: false, error: "Linking error: " + err.message, capturedAPIs: 0 };
+  }
+
+  if (!linkResult.activationUrl) {
+    return { success: false, error: "No activation URL in response", capturedAPIs: 1 };
+  }
+
+  // ── Step 2: Puppeteer — Open GoPay auth page + click Hubungkan ────
+  console.log("[Midtrans] Step 2: Opening GoPay auth page...");
 
   let puppeteer;
   try {
@@ -36,232 +109,173 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
     console.log("[Midtrans] Using stealth mode");
   } catch {
     puppeteer = require("puppeteer");
-    console.log("[Midtrans] Stealth not available, using plain puppeteer");
   }
 
   const browser = await puppeteer.launch({
     headless: "new",
     args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
+      "--no-sandbox", "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage", "--disable-gpu",
       "--disable-blink-features=AutomationControlled",
     ],
   });
-
-  const debugDir = path.join(__dirname, "public", "debug");
-  if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
 
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 430, height: 932 });
     await page.setUserAgent("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
-    
-    // Hide webdriver
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
     });
 
-    // ── Network Interception ────────────────────────────────────────────
+    // ── Network Interception — capture ALL domains ──────────────────
     page.on("request", (req) => {
-      if (req.method() !== "GET" && req.url().includes("midtrans.com")) {
-        capturedAPIs.push({
-          step: capturedAPIs.length + 1,
-          method: req.method(),
-          url: req.url(),
-          headers: req.headers(),
-          body: req.postData()?.substring(0, 2000) || null,
-          timestamp: Date.now(),
-        });
-        console.log(`[Midtrans] [API] ${req.method()} → ${req.url()}`);
-        if (req.postData()) console.log(`[Midtrans] [API] Body: ${req.postData()?.substring(0, 300)}`);
+      if (req.method() !== "GET") {
+        const url = req.url();
+        if (url.includes("gopayapi.com") || url.includes("midtrans.com") || url.includes("gojek") || url.includes("gopay")) {
+          capturedAPIs.push({
+            step: capturedAPIs.length + 1,
+            method: req.method(),
+            url: url,
+            headers: req.headers(),
+            body: req.postData()?.substring(0, 2000) || null,
+            timestamp: Date.now(),
+          });
+          console.log(`[GoPay] [API] ${req.method()} → ${url}`);
+          if (req.postData()) console.log(`[GoPay] [API] Body: ${req.postData()?.substring(0, 500)}`);
+        }
       }
     });
 
     page.on("response", async (res) => {
       const url = res.url();
-      if (res.request().method() !== "GET" && url.includes("midtrans.com")) {
+      if (res.request().method() !== "GET" && (url.includes("gopayapi.com") || url.includes("midtrans.com") || url.includes("gojek") || url.includes("gopay"))) {
         try {
           const body = await res.text();
           const api = capturedAPIs.find(a => a.url === url && !a.response);
           if (api) {
-            api.response = { status: res.status(), body: body.substring(0, 1000) };
-            console.log(`[Midtrans] [API] Response ${res.status()} from ${url}`);
-            console.log(`[Midtrans] [API] Body: ${body.substring(0, 300)}`);
+            api.response = { status: res.status(), body: body.substring(0, 2000) };
+            console.log(`[GoPay] [API] Response ${res.status()} from ${url}`);
+            console.log(`[GoPay] [API] Body: ${body.substring(0, 500)}`);
           }
         } catch {}
       }
     });
 
-    // ── Step 1: Load page ────────────────────────────────────────────────
-    console.log("[Midtrans] Loading page...");
-    await page.goto(midtransUrl, { waitUntil: "networkidle2", timeout: 60000 });
-    await delay(5000); // Wait for React SPA to fully render
-    await page.screenshot({ path: path.join(debugDir, "mt_01_loaded.png"), fullPage: true });
-    console.log("[Midtrans] Page loaded!");
+    // Go to GoPay activation page
+    console.log("[Midtrans] Opening:", linkResult.activationUrl);
+    await page.goto(linkResult.activationUrl, { waitUntil: "networkidle2", timeout: 30000 });
+    await delay(5000);
+    await page.screenshot({ path: path.join(debugDir, "mt_gopay_auth.png"), fullPage: true });
 
-    // ── Step 2: Enter phone number ──────────────────────────────────────
-    console.log("[Midtrans] Looking for phone input...");
+    // Dump page content
+    const pageText = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "");
+    console.log("[Midtrans] Page text:", pageText.substring(0, 300));
 
-    // Try to find phone input field
-    const phoneInput = await findInput(page, [
-      "input[name='phone']",
-      "input[type='tel']",
-      "input[placeholder*='phone']",
-      "input[placeholder*='nomor']",
-      "input[placeholder*='handphone']",
-      "input[placeholder*='08']",
-      "input[autocomplete='tel']",
-    ]);
-
-    if (phoneInput) {
-      await phoneInput.click({ clickCount: 3 });
-      await delay(300);
-      await phoneInput.type(phoneNumber, { delay: 80 });
-      console.log("[Midtrans] Phone: OK");
-      await delay(500);
-      await page.screenshot({ path: path.join(debugDir, "mt_02_phone.png"), fullPage: true });
-
-      // Click submit/continue button — try many labels
-      const clicked = await clickButton(page, [
-        "Link and pay", "Link and Pay", "Lanjutkan", "Lanjut",
-        "Continue", "Next", "Submit", "Konfirmasi", "Verify",
-        "Kirim", "Link", "Hubungkan", "Connect", "Proceed", "OK",
-      ]);
-
-      // If no button found, try pressing Enter
-      if (!clicked) {
-        console.log("[Midtrans] No button found — trying Enter key...");
-        await dumpButtons(page);
-        await page.keyboard.press("Enter");
-        console.log("[Midtrans] Pressed Enter");
-      }
-
-      await delay(3000);
-      await page.screenshot({ path: path.join(debugDir, "mt_03_after_phone.png"), fullPage: true });
-
-      // Check if we captured the activation_link_url from the linking API
-      const linkingAPI = capturedAPIs.find(a => a.url?.includes("/linking") && a.response);
-      if (linkingAPI && linkingAPI.response) {
-        try {
-          const linkResp = JSON.parse(linkingAPI.response.body);
-          if (linkResp.activation_link_url) {
-            console.log("[Midtrans] Got activation URL:", linkResp.activation_link_url);
-            console.log("[Midtrans] Navigating to GoPay auth page...");
-            await page.goto(linkResp.activation_link_url, { waitUntil: "networkidle2", timeout: 30000 });
-            await delay(5000);
-            await page.screenshot({ path: path.join(debugDir, "mt_03b_gopay_auth.png"), fullPage: true });
-            console.log("[Midtrans] GoPay auth page loaded!");
-            
-            // Dump the page content
-            const pageContent = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "");
-            console.log("[Midtrans] Page text:", pageContent.substring(0, 300));
-
-            // Click "Hubungkan" (Connect) button to trigger OTP!
-            console.log("[Midtrans] Clicking Hubungkan to trigger OTP...");
-            const hubungkanClicked = await clickButton(page, [
-              "Hubungkan", "Connect", "Link", "Lanjut", "Lanjutkan",
-              "Continue", "Authorize", "Confirm", "OK",
-            ]);
-            
-            if (hubungkanClicked) {
-              console.log("[Midtrans] ✅ Hubungkan clicked — OTP should be sent!");
-            } else {
-              console.log("[Midtrans] ⚠️ Hubungkan button not found");
-              await dumpButtons(page);
-            }
-            
-            await delay(3000);
-            await page.screenshot({ path: path.join(debugDir, "mt_03c_after_hubungkan.png"), fullPage: true });
-          }
-        } catch (e) {
-          console.log("[Midtrans] Parse error:", e.message);
-        }
-      }
-    } else {
-      console.log("[Midtrans] Phone input not found — dumping inputs...");
-      await dumpInputs(page);
-      await page.screenshot({ path: path.join(debugDir, "mt_02_no_phone.png"), fullPage: true });
+    // Check for rate limit
+    if (pageText.includes("kebanyakan") || pageText.includes("too many")) {
+      console.log("[Midtrans] ⚠️ Rate limited by GoPay!");
+      saveCapture(capturedAPIs);
+      return { success: false, error: "GoPay rate limit — try again later", capturedAPIs: capturedAPIs.length };
     }
 
-    // ── Step 3: Wait for OTP ────────────────────────────────────────────
-    console.log("[Midtrans] Waiting for OTP (up to 120s)...");
+    // Click "Hubungkan" to trigger OTP
+    console.log("[Midtrans] Clicking Hubungkan...");
+    const hubClicked = await clickButton(page, [
+      "Hubungkan", "Connect", "Link", "Authorize", "Lanjut", "Lanjutkan", "Continue", "OK",
+    ]);
+
+    if (hubClicked) {
+      console.log("[Midtrans] ✅ Hubungkan clicked!");
+    } else {
+      console.log("[Midtrans] ⚠️ Hubungkan not found");
+      await dumpButtons(page);
+    }
+
+    await delay(3000);
+    await page.screenshot({ path: path.join(debugDir, "mt_after_hubungkan.png"), fullPage: true });
+
+    // ── Step 3: Wait for OTP ──────────────────────────────────────────
+    console.log("[Midtrans] Waiting for OTP on WhatsApp (up to 120s)...");
     let otpCode = null;
     try {
       const otpResult = await waitForOTP(120000);
       otpCode = otpResult.code;
-      console.log("[Midtrans] OTP received:", otpCode);
+      console.log("[Midtrans] ✅ OTP received:", otpCode);
     } catch (e) {
-      console.log("[Midtrans] OTP timeout:", e.message);
+      console.log("[Midtrans] ❌ OTP timeout");
       saveCapture(capturedAPIs);
+      await page.screenshot({ path: path.join(debugDir, "mt_otp_timeout.png"), fullPage: true });
       return { success: false, error: "OTP timeout", capturedAPIs: capturedAPIs.length };
     }
 
-    // Find OTP input and fill
+    // Find and fill OTP input
     await delay(2000);
     const otpInput = await findInput(page, [
-      "input[name='otp']",
-      "input[type='number']",
-      "input[placeholder*='OTP']",
-      "input[placeholder*='kode']",
-      "input[placeholder*='verif']",
-      "input[maxlength='6']",
-      "input[maxlength='4']",
+      "input[name='otp']", "input[type='number']", "input[type='tel']",
+      "input[placeholder*='OTP']", "input[placeholder*='kode']",
+      "input[maxlength='6']", "input[maxlength='4']",
     ]);
 
     if (otpInput) {
       await otpInput.click({ clickCount: 3 });
       await delay(300);
       await otpInput.type(otpCode, { delay: 80 });
-      console.log("[Midtrans] OTP: OK");
+      console.log("[Midtrans] OTP filled!");
       await delay(500);
-      await page.screenshot({ path: path.join(debugDir, "mt_04_otp.png"), fullPage: true });
-
-      await clickButton(page, ["Konfirmasi", "Verify", "Submit", "Lanjut", "Continue"]);
+      await page.screenshot({ path: path.join(debugDir, "mt_otp_filled.png"), fullPage: true });
+      await clickButton(page, ["Konfirmasi", "Verify", "Submit", "Lanjut", "Continue", "OK"]);
       await delay(3000);
-      await page.screenshot({ path: path.join(debugDir, "mt_05_after_otp.png"), fullPage: true });
     } else {
-      console.log("[Midtrans] OTP input not found — dumping inputs...");
-      await dumpInputs(page);
+      // Try individual digit inputs (6 separate boxes)
+      const allInputs = await page.$$("input");
+      const visibleInputs = [];
+      for (const inp of allInputs) {
+        const vis = await inp.isIntersectingViewport().catch(() => false);
+        if (vis) visibleInputs.push(inp);
+      }
+      if (visibleInputs.length >= 4) {
+        for (let i = 0; i < otpCode.length && i < visibleInputs.length; i++) {
+          await visibleInputs[i].type(otpCode[i], { delay: 100 });
+        }
+        console.log("[Midtrans] OTP filled (individual boxes)!");
+      } else {
+        console.log("[Midtrans] No OTP input found");
+        await dumpInputs(page);
+      }
+      await delay(3000);
     }
 
-    // ── Step 4: Enter PIN (first time) ──────────────────────────────────
+    await page.screenshot({ path: path.join(debugDir, "mt_after_otp.png"), fullPage: true });
+
+    // ── Step 4: Enter PIN ───────────────────────────────────────────
     console.log("[Midtrans] Looking for PIN input...");
     await delay(2000);
-    await enterPIN(page, pin, debugDir, "mt_06_pin1");
+    await enterPIN(page, pin, debugDir, "mt_pin1");
 
-    // ── Step 5: Click "Pay now" / "Bayar" ───────────────────────────────
+    // ── Step 5: Pay button ──────────────────────────────────────────
     console.log("[Midtrans] Looking for Pay button...");
     await delay(3000);
-    await page.screenshot({ path: path.join(debugDir, "mt_07_pay_page.png"), fullPage: true });
+    await page.screenshot({ path: path.join(debugDir, "mt_pay_page.png"), fullPage: true });
     await clickButton(page, ["Pay now", "Bayar", "Pay", "Confirm", "Konfirmasi"]);
     await delay(3000);
-    await page.screenshot({ path: path.join(debugDir, "mt_08_after_pay.png"), fullPage: true });
 
-    // ── Step 6: Enter PIN (second time) ─────────────────────────────────
-    console.log("[Midtrans] Looking for second PIN input...");
+    // ── Step 6: Second PIN ──────────────────────────────────────────
+    console.log("[Midtrans] Looking for second PIN...");
     await delay(2000);
-    await enterPIN(page, pin, debugDir, "mt_09_pin2");
+    await enterPIN(page, pin, debugDir, "mt_pin2");
 
-    // ── Step 7: Wait for completion ─────────────────────────────────────
-    console.log("[Midtrans] Waiting for completion...");
+    // ── Done ─────────────────────────────────────────────────────────
     await delay(5000);
-    await page.screenshot({ path: path.join(debugDir, "mt_10_final.png"), fullPage: true });
+    await page.screenshot({ path: path.join(debugDir, "mt_final.png"), fullPage: true });
 
     const finalUrl = page.url();
     console.log("[Midtrans] Final URL:", finalUrl);
 
-    // Save captured APIs
     saveCapture(capturedAPIs);
+    console.log("[Midtrans] ✅ Done! Captured", capturedAPIs.length, "API calls");
 
-    console.log("[Midtrans] Done! Captured", capturedAPIs.length, "API calls");
-
-    return {
-      success: true,
-      finalUrl,
-      capturedAPIs: capturedAPIs.length,
-    };
+    return { success: true, finalUrl, capturedAPIs: capturedAPIs.length };
 
   } finally {
     await browser.close();
@@ -289,8 +303,7 @@ async function findInput(page, selectors) {
 async function clickButton(page, labels) {
   for (const label of labels) {
     try {
-      // Try button with text
-      const btns = await page.$$("button, a, [role='button'], input[type='submit']");
+      const btns = await page.$$("button, a, [role='button'], input[type='submit'], div[onclick], span[onclick]");
       for (const btn of btns) {
         const text = await page.evaluate(el => el.textContent?.trim() || el.value || "", btn);
         if (text.toLowerCase().includes(label.toLowerCase())) {
@@ -309,23 +322,19 @@ async function clickButton(page, labels) {
 }
 
 async function enterPIN(page, pin, debugDir, prefix) {
-  // PIN inputs are often 6 separate inputs or one input
   const pinInputs = await page.$$("input[type='password'], input[type='tel'], input[type='number']");
   const visiblePins = [];
-
   for (const inp of pinInputs) {
     const visible = await inp.isIntersectingViewport().catch(() => false);
     if (visible) visiblePins.push(inp);
   }
 
   if (visiblePins.length >= 6) {
-    // 6 separate PIN inputs
     for (let i = 0; i < 6 && i < pin.length; i++) {
       await visiblePins[i].type(pin[i], { delay: 100 });
     }
     console.log("[Midtrans] PIN entered (6 fields)");
   } else if (visiblePins.length >= 1) {
-    // Single PIN input
     await visiblePins[0].click({ clickCount: 3 });
     await delay(200);
     await visiblePins[0].type(pin, { delay: 80 });
@@ -336,11 +345,7 @@ async function enterPIN(page, pin, debugDir, prefix) {
   }
 
   await delay(500);
-  if (debugDir) {
-    await page.screenshot({ path: path.join(debugDir, `${prefix}.png`), fullPage: true });
-  }
-
-  // Auto-submit after PIN (some forms auto-submit on 6 digits)
+  if (debugDir) await page.screenshot({ path: path.join(debugDir, `${prefix}.png`), fullPage: true });
   await delay(1000);
   await clickButton(page, ["Bayar", "Pay", "Confirm", "Konfirmasi", "Submit", "Lanjut"]);
 }
@@ -349,8 +354,7 @@ async function dumpInputs(page) {
   const inputs = await page.evaluate(() => {
     return Array.from(document.querySelectorAll("input, select, textarea")).map(el => ({
       tag: el.tagName, type: el.type, name: el.name, id: el.id,
-      placeholder: el.placeholder, autocomplete: el.autocomplete,
-      visible: el.offsetParent !== null,
+      placeholder: el.placeholder, visible: el.offsetParent !== null,
     }));
   });
   console.log("[Midtrans] Inputs:", JSON.stringify(inputs, null, 2));
@@ -362,7 +366,6 @@ async function dumpButtons(page) {
       tag: el.tagName, text: el.textContent?.trim()?.substring(0, 50),
       id: el.id, class: el.className?.substring?.(0, 50),
       visible: el.offsetParent !== null,
-      href: el.href || null,
     }));
   });
   console.log("[Midtrans] Buttons:", JSON.stringify(buttons.filter(b => b.visible), null, 2));
@@ -371,7 +374,6 @@ async function dumpButtons(page) {
 function saveCapture(apis) {
   try {
     const data = { endpoints: {}, raw: apis, capturedAt: new Date().toISOString() };
-    // Organize by step
     apis.forEach((api, i) => { data.endpoints[`step_${i + 1}`] = { method: api.method, url: api.url, body: api.body }; });
     fs.writeFileSync(CAPTURED_FILE, JSON.stringify(data, null, 2));
     console.log("[Midtrans] API capture saved to", CAPTURED_FILE);
@@ -382,4 +384,4 @@ function saveCapture(apis) {
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-module.exports = { automateGoPay, hasCapturedAPI };
+module.exports = { automateGoPay, linkGoPay };
