@@ -756,10 +756,12 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
   const address = addresses[addressRotationIndex % addresses.length];
   addressRotationIndex++;
 
-  const proxy = cfg.checkoutProxy || null;
+  // NOTE: Don't use proxy for Puppeteer — Stripe/Cloudflare blocks proxy IPs
+  // The proxy is only needed for curl-impersonate API calls
+  const proxy = null;
 
   console.log(`\n${"═".repeat(60)}`);
-  console.log(`[AutoCheckout] Starting — Address: "${address.label}" | Proxy: ${proxy ? "yes" : "none"}`);
+  console.log(`[AutoCheckout] Starting — Address: "${address.label}" | Proxy: direct (no proxy)`);
   console.log(`${"═".repeat(60)}`);
 
   try {
