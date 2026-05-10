@@ -5,7 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const { COUNTRIES_LIST, STATES } = require("./countries");
 const whatsapp = require("./whatsapp");
-const { automateGoPay } = require("./midtrans-auto");
+const { automateGoPay, continueWithOTP } = require("./midtrans-auto");
 
 const app = express();
 const PORT = 3000;
@@ -587,6 +587,20 @@ app.post("/api/gopay/test", requireAuth, async (req, res) => {
       cfg.gopayPin,
       (timeout) => whatsapp.waitForOTP(timeout)
     );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual OTP submission — continue after auto-detect fails
+app.post("/api/gopay/submit-otp", requireAuth, async (req, res) => {
+  const { referenceId, otp } = req.body;
+  if (!referenceId || !otp) return res.status(400).json({ error: "referenceId and otp required" });
+
+  const cfg = loadConfig();
+  try {
+    const result = await continueWithOTP(referenceId, otp, cfg.gopayPin);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

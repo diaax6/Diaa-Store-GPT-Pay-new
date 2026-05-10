@@ -99,15 +99,21 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
   console.log("[GoPay-API] Step 3: ✅ OTP sent to WhatsApp!");
 
   // ── Step 4: Wait for OTP on WhatsApp ─────────────────────────────
-  console.log("[GoPay-API] Step 4: Waiting for OTP on WhatsApp (120s)...");
+  console.log("[GoPay-API] Step 4: Waiting for OTP on WhatsApp (60s)...");
   let otpCode;
   try {
-    const otpResult = await waitForOTP(120000);
+    const otpResult = await waitForOTP(60000);
     otpCode = otpResult.code;
     console.log("[GoPay-API] Step 4: ✅ OTP received:", otpCode);
   } catch (e) {
-    console.log("[GoPay-API] Step 4: ❌ OTP timeout");
-    return { success: false, error: "OTP timeout — check WhatsApp", step: 4, referenceId };
+    console.log("[GoPay-API] Step 4: ⏳ OTP not auto-received — waiting for manual input");
+    return {
+      success: false,
+      waitingForOTP: true,
+      referenceId,
+      message: "OTP sent to WhatsApp — enter it manually",
+      step: 4,
+    };
   }
 
   // ── Step 5: Validate OTP ─────────────────────────────────────────
@@ -172,4 +178,65 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
   };
 }
 
-module.exports = { automateGoPay };
+// ──────────────────────────────────────────────────────────────────────
+// Continue with manual OTP — called when auto-detect fails
+// ──────────────────────────────────────────────────────────────────────
+
+async function continueWithOTP(referenceId, otpCode, pin) {
+  console.log("[GoPay-API] Continuing with manual OTP:", otpCode, "ref:", referenceId);
+
+  // Step 5: Validate OTP
+  console.log("[GoPay-API] Step 5: Validating OTP...");
+  const otpRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-otp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/plain, */*",
+      "User-Agent": UA,
+      "Origin": "https://merchants-gws-app.gopayapi.com",
+      "Referer": "https://merchants-gws-app.gopayapi.com/",
+      "x-user-locale": "en-US",
+    },
+    body: JSON.stringify({ reference_id: referenceId, otp: otpCode }),
+  });
+
+  const otpData = await otpRes.json();
+  console.log("[GoPay-API] Step 5 response:", JSON.stringify(otpData).substring(0, 300));
+
+  if (!otpData.success) {
+    return { success: false, error: "OTP validation failed: " + JSON.stringify(otpData) };
+  }
+
+  const nextAction = otpData.data?.next_action;
+  console.log("[GoPay-API] Step 5: ✅ OTP validated — next:", nextAction);
+
+  // Step 6: Enter PIN
+  if (nextAction && nextAction.includes("pin") && pin) {
+    console.log("[GoPay-API] Step 6: Entering PIN...");
+    const pinRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": UA,
+        "Origin": "https://merchants-gws-app.gopayapi.com",
+        "Referer": "https://merchants-gws-app.gopayapi.com/",
+        "x-user-locale": "en-US",
+      },
+      body: JSON.stringify({ reference_id: referenceId, pin: pin }),
+    });
+
+    const pinData = await pinRes.json();
+    console.log("[GoPay-API] Step 6 response:", JSON.stringify(pinData).substring(0, 300));
+
+    if (!pinData.success) {
+      return { success: false, error: "PIN failed: " + JSON.stringify(pinData) };
+    }
+    console.log("[GoPay-API] Step 6: ✅ PIN accepted!");
+  }
+
+  console.log("[GoPay-API] ✅ COMPLETE!");
+  return { success: true, referenceId, message: "GoPay linked!" };
+}
+
+module.exports = { automateGoPay, continueWithOTP };

@@ -624,7 +624,24 @@
       if (data.success) {
         resultDiv.style.background = "rgba(16,185,129,0.15)";
         resultDiv.style.color = "#10b981";
-        resultDiv.innerHTML = `✅ GoPay activated! Captured ${data.capturedAPIs || 0} API calls.`;
+        resultDiv.innerHTML = "✅ GoPay activated successfully!";
+      } else if (data.waitingForOTP) {
+        // Show manual OTP input
+        resultDiv.style.background = "rgba(245,158,11,0.15)";
+        resultDiv.style.color = "#f59e0b";
+        resultDiv.innerHTML = `
+          ⏳ OTP sent to WhatsApp — enter it below:<br>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <input type="text" id="manualOtpInput" placeholder="Enter OTP" maxlength="6"
+              style="flex:1;padding:8px 12px;border:1px solid #f59e0b;border-radius:6px;background:#1a1a2e;color:#fff;font-size:16px;text-align:center;letter-spacing:4px;" />
+            <button onclick="submitManualOTP('${data.referenceId}')"
+              style="padding:8px 16px;background:#10b981;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">
+              Submit
+            </button>
+          </div>
+        `;
+        // Focus on OTP input
+        setTimeout(() => $("manualOtpInput")?.focus(), 100);
       } else {
         resultDiv.style.background = "rgba(239,68,68,0.15)";
         resultDiv.style.color = "#ef4444";
@@ -638,6 +655,40 @@
     } finally {
       btn.disabled = false;
       spinner.classList.add("hidden");
+    }
+  };
+
+  // ── Submit Manual OTP ────────────────────────────────────────────
+  window.submitManualOTP = async function (referenceId) {
+    const otp = $("manualOtpInput")?.value?.trim();
+    if (!otp || otp.length < 4) { alert("Enter valid OTP"); return; }
+
+    const resultDiv = $("gopayActivateResult");
+    resultDiv.style.background = "rgba(59,130,246,0.15)";
+    resultDiv.style.color = "#3b82f6";
+    resultDiv.innerHTML = "⏳ Validating OTP + PIN...";
+
+    try {
+      const res = await fetch("/api/gopay/submit-otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ referenceId, otp }),
+      });
+      const data = await res.json();
+
+      if (data.success) {
+        resultDiv.style.background = "rgba(16,185,129,0.15)";
+        resultDiv.style.color = "#10b981";
+        resultDiv.innerHTML = "✅ GoPay activated successfully!";
+      } else {
+        resultDiv.style.background = "rgba(239,68,68,0.15)";
+        resultDiv.style.color = "#ef4444";
+        resultDiv.innerHTML = `❌ ${data.error || "Failed"}`;
+      }
+    } catch (err) {
+      resultDiv.style.background = "rgba(239,68,68,0.15)";
+      resultDiv.style.color = "#ef4444";
+      resultDiv.innerHTML = `❌ ${err.message}`;
     }
   };
 
