@@ -3,6 +3,7 @@ const { execFile } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { COUNTRIES_LIST, STATES } = require("./countries");
 
 const app = express();
 const PORT = 3000;
@@ -193,6 +194,11 @@ app.delete("/api/admin/addresses/:index", requireAdmin, (req, res) => {
   return res.json({ success: true, addresses: cfg.addresses });
 });
 
+// ── Countries/States API ──────────────────────────────────────────────────
+app.get("/api/countries", (req, res) => {
+  return res.json({ countries: COUNTRIES_LIST, states: STATES });
+});
+
 // ── Country configs ───────────────────────────────────────────────────────
 const PROMO = { promo_campaign_id: "plus-1-month-free", is_coupon_from_query_param: false };
 const COUNTRIES = {
@@ -368,7 +374,6 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     "--window-size=1280,900",
   ];
 
-  // Parse proxy for Puppeteer
   let proxyAuth = null;
   if (proxy) {
     try {
@@ -378,7 +383,6 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
         proxyAuth = { username: decodeURIComponent(pUrl.username), password: decodeURIComponent(pUrl.password || "") };
       }
     } catch {
-      // If URL parsing fails, pass proxy as-is
       launchArgs.push(`--proxy-server=${proxy}`);
     }
   }
@@ -388,153 +392,215 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
 
   try {
     const page = await browser.newPage();
-
     if (proxyAuth) await page.authenticate(proxyAuth);
-
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
     // ── Step 1: Navigate ──
-    console.log("[AutoCheckout] Opening checkout:", checkoutUrl.substring(0, 80) + "...");
+    console.log("[AutoCheckout] Opening:", checkoutUrl.substring(0, 80) + "...");
     await page.goto(checkoutUrl, { waitUntil: "networkidle2", timeout: 45000 });
-    await delay(3000);
+    await delay(4000);
 
     // ── Step 2: Click GoPay ──
     console.log("[AutoCheckout] Selecting GoPay...");
     const gopayClicked = await page.evaluate(() => {
-      // Strategy 1: Find by text content
       const allEls = document.querySelectorAll("div, span, label, button, li");
       for (const el of allEls) {
-        if (el.textContent?.trim() === "GoPay" || el.textContent?.trim() === "GoPay") {
-          const clickTarget = el.closest("[role='radio'], [role='option'], [data-testid], button, label") || el.parentElement;
-          if (clickTarget) { clickTarget.click(); return "text"; }
+        const txt = el.textContent?.trim();
+        if (txt === "GoPay" && el.children.length <= 2) {
+          const target = el.closest("[role='radio'], [role='option'], [data-testid], button, label, li") || el.parentElement;
+          if (target) { target.click(); return "found"; }
         }
       }
-      // Strategy 2: Find radio with gopay in attributes
-      const radios = document.querySelectorAll("[data-testid*='gopay' i], [data-testid*='GOPAY'], [value*='gopay' i]");
-      if (radios.length) { radios[0].click(); return "attr"; }
       return null;
     });
-    console.log(`[AutoCheckout] GoPay selection: ${gopayClicked || "NOT FOUND"}`);
-    await delay(2000);
+    console.log(`[AutoCheckout] GoPay: ${gopayClicked || "NOT FOUND"}`);
+    await delay(3000);
 
     // ── Step 3: Fill Name ──
     console.log("[AutoCheckout] Filling name:", address.name);
-    await fillField(page, [
-      "#billingName",
-      "input[autocomplete='name']",
-      "input[placeholder*='Name' i]",
-      "input[name*='name' i]",
-    ], address.name);
+    const nameSelectors = ["#billingName", "input[autocomplete='name']", "input[placeholder*='Name' i]", "input[name*='name' i]"];
+    for (const sel of nameSelectors) {
+      const el = await page.$(sel);
+      if (el) {
+        await el.click({ clickCount: 3 });
+        await el.type(address.name, { delay: 30 });
+        console.log("[AutoCheckout] Name filled via:", sel);
+        break;
+      }
+    }
     await delay(500);
 
-    // ── Step 4: Select Country ──
+    // ── Step 4: Select Country (native <select>) ──
     console.log("[AutoCheckout] Selecting country:", address.country);
-    await handleDropdown(page, [
-      "#billingCountry",
-      "select[autocomplete='country']",
-      "select[name*='country' i]",
-    ], address.country);
-    await delay(1000);
+    const countrySelectors = ["#billingCountry", "select[autocomplete='country']", "select[name*='country' i]"];
+    for (const sel of countrySelectors) {
+      const el = await page.$(sel);
+      if (el) {
+        // Use page.select with the country code
+        try {
+          await page.select(sel, address.country);
+          console.log("[AutoCheckout] Country selected via:", sel);
+        } catch {
+          // Fallback: try matching by text
+          await page.evaluate((selector, code) => {
+            const select = document.querySelector(selector);
+            if (!select) return;
+            const opt = Array.from(select.options).find(o => o.value === code || o.text.includes(code));
+            if (opt) { select.value = opt.value; select.dispatchEvent(new Event('change', { bubbles: true })); }
+          }, sel, address.country);
+        }
+        break;
+      }
+    }
+    await delay(2000);
 
-    // ── Step 5: Fill Address Line 1 ──
-    console.log("[AutoCheckout] Filling address line 1...");
-    await fillField(page, [
-      "#billingAddressLine1",
-      "input[autocomplete='address-line1']",
-      "input[placeholder*='Address line 1' i]",
-      "input[name*='addressLine1' i]",
-    ], address.addressLine1);
-    await delay(300);
+    // ── Step 5: Click "Enter address manually" link ──
+    console.log("[AutoCheckout] Looking for 'Enter address manually' link...");
+    const manualClicked = await page.evaluate(() => {
+      const links = document.querySelectorAll("a, button, span, div");
+      for (const link of links) {
+        const txt = link.textContent?.trim().toLowerCase();
+        if (txt && (txt.includes("enter address manually") || txt.includes("manual") || txt.includes("enter address"))) {
+          link.click();
+          return txt;
+        }
+      }
+      return null;
+    });
+    console.log(`[AutoCheckout] Manual address link: ${manualClicked || "NOT FOUND (fields may already be visible)"}`);
+    await delay(2000);
 
-    // ── Step 6: Fill Address Line 2 (optional) ──
+    // ── Step 6: Fill Address Line 1 ──
+    console.log("[AutoCheckout] Filling address line 1:", address.addressLine1);
+    const addr1Selectors = ["#billingAddressLine1", "input[autocomplete='address-line1']", "input[placeholder*='Address line 1' i]", "input[placeholder*='Address' i]:not([placeholder*='line 2' i])", "input[name*='addressLine1' i]"];
+    for (const sel of addr1Selectors) {
+      const el = await page.$(sel);
+      if (el) {
+        await el.click({ clickCount: 3 });
+        await el.type(address.addressLine1, { delay: 25 });
+        console.log("[AutoCheckout] Address1 filled via:", sel);
+        break;
+      }
+    }
+    await delay(500);
+
+    // ── Step 7: Fill Address Line 2 (optional) ──
     if (address.addressLine2) {
       console.log("[AutoCheckout] Filling address line 2...");
-      await fillField(page, [
-        "#billingAddressLine2",
-        "input[autocomplete='address-line2']",
-        "input[placeholder*='Address line 2' i]",
-      ], address.addressLine2);
+      const addr2Selectors = ["#billingAddressLine2", "input[autocomplete='address-line2']", "input[placeholder*='Address line 2' i]"];
+      for (const sel of addr2Selectors) {
+        const el = await page.$(sel);
+        if (el) {
+          await el.click({ clickCount: 3 });
+          await el.type(address.addressLine2, { delay: 25 });
+          break;
+        }
+      }
       await delay(300);
     }
 
-    // ── Step 7: Fill City ──
+    // ── Step 8: Fill City ──
     console.log("[AutoCheckout] Filling city:", address.city);
-    await fillField(page, [
-      "#billingLocality",
-      "input[autocomplete='address-level2']",
-      "input[placeholder*='City' i]",
-      "input[name*='city' i]",
-      "input[name*='locality' i]",
-    ], address.city);
+    const citySelectors = ["#billingLocality", "input[autocomplete='address-level2']", "input[placeholder*='City' i]", "input[name*='city' i]", "input[name*='locality' i]"];
+    for (const sel of citySelectors) {
+      const el = await page.$(sel);
+      if (el) {
+        await el.click({ clickCount: 3 });
+        await el.type(address.city, { delay: 25 });
+        break;
+      }
+    }
     await delay(300);
 
-    // ── Step 8: Fill ZIP ──
+    // ── Step 9: Fill ZIP ──
     console.log("[AutoCheckout] Filling ZIP:", address.zip);
-    await fillField(page, [
-      "#billingPostal",
-      "input[autocomplete='postal-code']",
-      "input[placeholder*='ZIP' i]",
-      "input[name*='postal' i]",
-      "input[name*='zip' i]",
-    ], address.zip);
+    const zipSelectors = ["#billingPostal", "input[autocomplete='postal-code']", "input[placeholder*='ZIP' i]", "input[placeholder*='Postal' i]", "input[name*='postal' i]"];
+    for (const sel of zipSelectors) {
+      const el = await page.$(sel);
+      if (el) {
+        await el.click({ clickCount: 3 });
+        await el.type(address.zip, { delay: 25 });
+        break;
+      }
+    }
     await delay(300);
 
-    // ── Step 9: Select State (if applicable) ──
+    // ── Step 10: Select State (native <select>) ──
     if (address.state) {
       console.log("[AutoCheckout] Selecting state:", address.state);
-      await handleDropdown(page, [
-        "#billingAdministrativeArea",
-        "select[autocomplete='address-level1']",
-        "select[name*='state' i]",
-        "select[name*='administrativeArea' i]",
-      ], address.state);
+      const stateSelectors = ["#billingAdministrativeArea", "select[autocomplete='address-level1']", "select[name*='state' i]", "select[name*='administrativeArea' i]"];
+      for (const sel of stateSelectors) {
+        const el = await page.$(sel);
+        if (el) {
+          try {
+            await page.select(sel, address.state);
+            console.log("[AutoCheckout] State selected via:", sel);
+          } catch {
+            await page.evaluate((selector, code) => {
+              const select = document.querySelector(selector);
+              if (!select) return;
+              const opt = Array.from(select.options).find(o => o.value === code || o.text.includes(code));
+              if (opt) { select.value = opt.value; select.dispatchEvent(new Event('change', { bubbles: true })); }
+            }, sel, address.state);
+          }
+          break;
+        }
+      }
       await delay(500);
     }
 
-    // ── Step 10: Handle terms checkbox ──
+    // ── Step 11: Handle terms checkbox ──
     console.log("[AutoCheckout] Checking terms checkbox...");
     await page.evaluate(() => {
       const checkboxes = document.querySelectorAll("input[type='checkbox']");
       checkboxes.forEach(cb => { if (!cb.checked) cb.click(); });
+      // Also try clicking checkbox containers/labels
+      const labels = document.querySelectorAll("label, [role='checkbox']");
+      labels.forEach(l => {
+        const cb = l.querySelector("input[type='checkbox']");
+        if (cb && !cb.checked) l.click();
+      });
     });
+    await delay(1000);
+
+    // ── Step 12: Scroll down and Click Subscribe ──
+    console.log("[AutoCheckout] Clicking Subscribe...");
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
     await delay(500);
 
-    // ── Step 11: Click Subscribe ──
-    console.log("[AutoCheckout] Clicking Subscribe...");
     const subClicked = await page.evaluate(() => {
-      // Strategy 1: button with text "Subscribe"
-      const buttons = document.querySelectorAll("button");
+      const buttons = document.querySelectorAll("button, [role='button']");
       for (const btn of buttons) {
-        if (btn.textContent?.trim().toLowerCase().includes("subscribe")) {
+        const txt = btn.textContent?.trim().toLowerCase();
+        if (txt && txt.includes("subscribe")) {
+          btn.scrollIntoView();
           btn.click();
-          return true;
+          return txt;
         }
       }
-      // Strategy 2: submit button
-      const submit = document.querySelector("button[type='submit'], [data-testid*='submit']");
-      if (submit) { submit.click(); return true; }
-      return false;
+      // Fallback: submit button
+      const submit = document.querySelector("button[type='submit']");
+      if (submit) { submit.click(); return "submit-fallback"; }
+      return null;
     });
-    console.log(`[AutoCheckout] Subscribe clicked: ${subClicked}`);
+    console.log(`[AutoCheckout] Subscribe: ${subClicked || "NOT FOUND"}`);
 
     if (!subClicked) {
       throw new Error("Could not find Subscribe button");
     }
 
-    // ── Step 12: Wait for redirect to midtrans/gopay ──
+    // ── Step 13: Wait for redirect to midtrans/gopay ──
     console.log("[AutoCheckout] Waiting for GoPay redirect...");
     let gopayUrl = null;
 
     try {
-      // Wait for navigation to midtrans.com
       await page.waitForFunction(
         () => window.location.href.includes("midtrans.com") || window.location.href.includes("gopay"),
         { timeout: 60000 }
       );
       gopayUrl = page.url();
     } catch {
-      // Try waiting for any navigation
       await delay(5000);
       const currentUrl = page.url();
       if (currentUrl !== checkoutUrl && !currentUrl.includes("stripe.com")) {
@@ -555,85 +621,6 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     await browser.close();
     console.log("[AutoCheckout] Browser closed.");
   }
-}
-
-// ── Puppeteer helper: fill a field trying multiple selectors ──
-async function fillField(page, selectors, value) {
-  for (const sel of selectors) {
-    try {
-      const el = await page.$(sel);
-      if (el) {
-        await el.click({ clickCount: 3 });
-        await el.type(value, { delay: 25 });
-        return true;
-      }
-    } catch {}
-  }
-  // Fallback: find by placeholder via evaluate
-  const filled = await page.evaluate((val) => {
-    const inputs = document.querySelectorAll("input[type='text'], input:not([type])");
-    for (const inp of inputs) {
-      if (!inp.value && inp.offsetParent !== null) {
-        inp.focus();
-        inp.value = val;
-        inp.dispatchEvent(new Event("input", { bubbles: true }));
-        inp.dispatchEvent(new Event("change", { bubbles: true }));
-        return true;
-      }
-    }
-    return false;
-  }, value);
-  return filled;
-}
-
-// ── Puppeteer helper: handle dropdown (select or custom) ──
-async function handleDropdown(page, selectors, value) {
-  for (const sel of selectors) {
-    try {
-      const el = await page.$(sel);
-      if (!el) continue;
-
-      const tagName = await page.evaluate(e => e.tagName.toLowerCase(), el);
-
-      if (tagName === "select") {
-        // Native select — try by value, visible text, or partial match
-        const selected = await page.evaluate((selector, val) => {
-          const select = document.querySelector(selector);
-          if (!select) return false;
-          const options = Array.from(select.options);
-          // Try exact match on text
-          let opt = options.find(o => o.text.trim().toLowerCase() === val.toLowerCase());
-          // Try partial match
-          if (!opt) opt = options.find(o => o.text.trim().toLowerCase().includes(val.toLowerCase()));
-          // Try value match
-          if (!opt) opt = options.find(o => o.value.toLowerCase() === val.toLowerCase());
-          if (opt) {
-            select.value = opt.value;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
-            return true;
-          }
-          return false;
-        }, sel, value);
-        if (selected) return true;
-      } else {
-        // Custom dropdown — click to open, then find option
-        await el.click();
-        await delay(800);
-        const clicked = await page.evaluate((val) => {
-          const items = document.querySelectorAll("[role='option'], [role='listbox'] > *, li, [data-testid*='option']");
-          for (const item of items) {
-            if (item.textContent?.trim().toLowerCase().includes(val.toLowerCase())) {
-              item.click();
-              return true;
-            }
-          }
-          return false;
-        }, value);
-        if (clicked) return true;
-      }
-    } catch {}
-  }
-  return false;
 }
 
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }

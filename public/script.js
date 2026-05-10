@@ -16,6 +16,53 @@
 
   const $ = id => document.getElementById(id);
 
+  let countriesData = [];
+  let statesData = {};
+
+  // ── Load countries/states data ──
+  async function loadCountriesData() {
+    try {
+      const res = await fetch("/api/countries");
+      const data = await res.json();
+      countriesData = data.countries || [];
+      statesData = data.states || {};
+      populateCountryDropdown();
+    } catch (e) { console.error("Failed to load countries", e); }
+  }
+
+  function populateCountryDropdown() {
+    const sel = $("addrCountry");
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Select Country *</option>';
+    countriesData.forEach(c => {
+      const opt = document.createElement("option");
+      opt.value = c.code;
+      opt.textContent = c.name;
+      sel.appendChild(opt);
+    });
+  }
+
+  function updateStateDropdown(countryCode) {
+    const sel = $("addrState");
+    if (!sel) return;
+    sel.innerHTML = '<option value="">State (if applicable)</option>';
+    const states = statesData[countryCode];
+    if (states && states.length) {
+      states.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s.code;
+        opt.textContent = s.name;
+        sel.appendChild(opt);
+      });
+    }
+  }
+
+  // Listen for country change
+  document.addEventListener('DOMContentLoaded', () => {
+    const countryEl = $("addrCountry");
+    if (countryEl) countryEl.addEventListener('change', () => updateStateDropdown(countryEl.value));
+  });
+
   // ══════════════════════════════════════════════════════════════
   // AUTH
   // ══════════════════════════════════════════════════════════════
@@ -142,7 +189,8 @@
       const data = await res.json();
       $("adminProxy").value = data.globalProxy || "";
       $("adminCheckoutProxy").value = data.checkoutProxy || "";
-      // Load addresses
+      // Load countries data then addresses
+      await loadCountriesData();
       await loadAddresses();
     } catch (e) {}
   }
@@ -250,7 +298,7 @@
     $("addrLine2").value = "";
     $("addrCity").value = "";
     $("addrZip").value = "";
-    $("addrState").value = "";
+    $("addrState").innerHTML = '<option value="">State (if applicable)</option>';
     $("addrEditIndex").value = "-1";
     $("btnSaveAddr").textContent = "Save Address";
   }
@@ -303,11 +351,13 @@
       $("addrLabel").value = a.label || "";
       $("addrName").value = a.name || "";
       $("addrCountry").value = a.country || "";
+      // Populate states for this country then set value
+      updateStateDropdown(a.country);
       $("addrLine1").value = a.addressLine1 || "";
       $("addrLine2").value = a.addressLine2 || "";
       $("addrCity").value = a.city || "";
       $("addrZip").value = a.zip || "";
-      $("addrState").value = a.state || "";
+      setTimeout(() => { $("addrState").value = a.state || ""; }, 100);
       $("addrEditIndex").value = index;
       $("btnSaveAddr").textContent = "Update Address";
       $("addressForm").classList.remove("hidden");

@@ -149,14 +149,18 @@
           <div class="address-form-grid">
             <input type="text" class="proxy-input" id="addrLabel" placeholder="Label (e.g. US Address 1)" />
             <input type="text" class="proxy-input" id="addrName" placeholder="Full Name *" />
-            <input type="text" class="proxy-input" id="addrCountry" placeholder="Country (e.g. United States) *" />
+            <select class="proxy-input" id="addrCountry">
+              <option value="">Select Country *</option>
+            </select>
             <input type="text" class="proxy-input" id="addrLine1" placeholder="Address Line 1 *" />
             <input type="text" class="proxy-input" id="addrLine2" placeholder="Address Line 2" />
             <div style="display:flex;gap:6px">
               <input type="text" class="proxy-input" id="addrCity" placeholder="City *" style="flex:1" />
               <input type="text" class="proxy-input" id="addrZip" placeholder="ZIP *" style="width:100px" />
             </div>
-            <input type="text" class="proxy-input" id="addrState" placeholder="State (if applicable)" />
+            <select class="proxy-input" id="addrState">
+              <option value="">State (if applicable)</option>
+            </select>
           </div>
           <div style="display:flex;gap:6px;margin-top:8px">
             <button class="btn btn-primary" onclick="saveAddress()" id="btnSaveAddr" style="flex:1;padding:10px">
