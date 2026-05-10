@@ -486,8 +486,26 @@ async function runAutoCheckout(checkoutUrl, address) {
     const midtransMatch = fullJson.match(/https?:\/\/[^"]*midtrans\.com[^"]*/);
     if (midtransMatch) gopayUrl = midtransMatch[0].replace(/\\\//g, "/");
   }
+  // Follow redirect to get final Midtrans URL
+  if (gopayUrl && gopayUrl.includes("stripe.com")) {
+    console.log("[DirectAPI] Following redirect:", gopayUrl);
+    try {
+      const rRes = await fetch(gopayUrl, { redirect: "manual" });
+      const location = rRes.headers.get("location");
+      if (location) {
+        console.log("[DirectAPI] Redirect →", location);
+        gopayUrl = location;
+        // Follow one more redirect if needed
+        if (!location.includes("midtrans.com")) {
+          const r2 = await fetch(location, { redirect: "manual" });
+          const loc2 = r2.headers.get("location");
+          if (loc2) { console.log("[DirectAPI] Redirect →", loc2); gopayUrl = loc2; }
+        }
+      }
+    } catch (e) { console.log("[DirectAPI] Redirect follow error:", e.message); }
+  }
 
-  console.log("[DirectAPI] GoPay URL:", gopayUrl || "NOT FOUND");
+  console.log("[DirectAPI] Final GoPay URL:", gopayUrl || "NOT FOUND");
   console.log("[DirectAPI] Done! ✓");
 
   return {
