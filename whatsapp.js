@@ -37,7 +37,7 @@ class WhatsAppClient extends EventEmitter {
     this.OTP_EXPIRY = 5 * 60 * 1000;
     this.authDir = path.join(process.cwd(), `baileys-auth-${id}`);
     this.reconnectAttempts = 0;
-    this.maxReconnects = 5;
+    this.maxReconnects = 15;
   }
 
   async initialize(usePairingCode = false, pairingPhone = null) {
@@ -106,17 +106,15 @@ class WhatsAppClient extends EventEmitter {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-        console.log(
-          `[WA:${this.id}] Disconnected (code: ${statusCode})`,
-          shouldReconnect ? "— will reconnect" : "— logged out"
-        );
+        console.log(`[WA:${this.id}] Disconnected (code: ${statusCode})`);
 
-        if (shouldReconnect && this._isRegistered && this.reconnectAttempts < this.maxReconnects) {
+        if (shouldReconnect && this.reconnectAttempts < this.maxReconnects) {
           this.reconnectAttempts++;
-          console.log(`[WA:${this.id}] Reconnecting in 5s... (attempt ${this.reconnectAttempts})`);
-          setTimeout(() => this.initialize(false), 5000);
-        } else if (!this._isRegistered) {
-          console.log(`[WA:${this.id}] Fresh session — waiting for pairing/QR. No auto-reconnect.`);
+          const delay = Math.min(3000 * this.reconnectAttempts, 15000);
+          console.log(`[WA:${this.id}] Reconnecting in ${delay/1000}s... (attempt ${this.reconnectAttempts})`);
+          setTimeout(() => this.initialize(this._usePairingCode, this._pairingPhone), delay);
+        } else {
+          console.log(`[WA:${this.id}] Stopped reconnecting.`);
         }
       }
     });
