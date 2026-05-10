@@ -494,6 +494,44 @@ async function runAutoCheckout(checkoutUrl, address) {
     await delay(1000);
     await page.screenshot({ path: path.join(debugDir, "04_filled.png"), fullPage: true });
 
+    // ── INTERCEPT: Capture all API calls when form submits ──
+    console.log("[AutoCheckout] Setting up network interception...");
+    const capturedRequests = [];
+    const capturedResponses = [];
+
+    page.on('request', req => {
+      const url = req.url();
+      if (url.includes('stripe.com') && (req.method() === 'POST')) {
+        capturedRequests.push({
+          url: url,
+          method: req.method(),
+          headers: req.headers(),
+          postData: req.postData()?.substring(0, 2000)
+        });
+        console.log("[INTERCEPT] POST →", url.substring(0, 120));
+        console.log("[INTERCEPT] Body:", req.postData()?.substring(0, 500));
+      }
+    });
+
+    page.on('response', async res => {
+      const url = res.url();
+      if (url.includes('stripe.com') && capturedRequests.some(r => r.url === url)) {
+        try {
+          const body = await res.text();
+          capturedResponses.push({ url, status: res.status(), body: body.substring(0, 3000) });
+          console.log("[INTERCEPT] Response", res.status(), "from", url.substring(0, 120));
+          console.log("[INTERCEPT] Body:", body.substring(0, 1000));
+        } catch {}
+      }
+    });
+
+    // Also track URL changes
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame()) {
+        console.log("[INTERCEPT] Navigation →", frame.url());
+      }
+    });
+
     // Click Pay/Subscribe button
     console.log("[AutoCheckout] Clicking Pay...");
     const btn = await page.evaluate(() => {
@@ -511,18 +549,36 @@ async function runAutoCheckout(checkoutUrl, address) {
       throw new Error("No Pay/Subscribe button");
     }
 
-    // Wait for GoPay redirect
-    console.log("[AutoCheckout] Waiting redirect...");
+    // Wait for redirect — check broader patterns
+    console.log("[AutoCheckout] Waiting for redirect (up to 90s)...");
     let gopayUrl = null;
+    const startUrl = page.url();
+
     try {
-      await page.waitForFunction(() => window.location.href.includes("midtrans.com") || window.location.href.includes("gopay"), { timeout: 60000 });
+      await page.waitForFunction(
+        (start) => window.location.href !== start && !window.location.href.includes('checkout.stripe.com'),
+        { timeout: 90000 },
+        startUrl
+      );
       gopayUrl = page.url();
+      console.log("[AutoCheckout] Redirected to:", gopayUrl);
     } catch {
-      await delay(5000);
+      console.log("[AutoCheckout] No navigation detected, checking URL...");
       const cur = page.url();
-      if (cur !== checkoutUrl && !cur.includes("stripe.com") && !cur.includes("pay.openai.com")) gopayUrl = cur;
+      if (cur !== startUrl) gopayUrl = cur;
     }
+
+    await delay(3000);
     await page.screenshot({ path: path.join(debugDir, "06_final.png"), fullPage: true });
+    console.log("[AutoCheckout] Final URL:", page.url());
+    console.log("[AutoCheckout] Captured", capturedRequests.length, "API requests,", capturedResponses.length, "responses");
+
+    // Save captured API data for building Direct API later
+    try {
+      fs.writeFileSync(path.join(debugDir, "api_capture.json"), JSON.stringify({ requests: capturedRequests, responses: capturedResponses }, null, 2));
+      console.log("[AutoCheckout] API capture saved to /debug/api_capture.json");
+    } catch {}
+
     console.log("[AutoCheckout] Result:", gopayUrl || "NO REDIRECT");
 
     return { success: !!gopayUrl, stripeUrl: checkoutUrl, gopayUrl, addressUsed: address.label, error: gopayUrl ? null : "No redirect" };
