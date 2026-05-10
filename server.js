@@ -440,57 +440,94 @@ async function runAutoCheckout(checkoutUrl, address) {
       await page.screenshot({ path: path.join(debugDir, "02b_gopay_retry.png"), fullPage: true });
     }
 
-    // Fill Name + Country + Click manual address
-    console.log("[AutoCheckout] Filling name & country...");
-    const p2 = await page.evaluate((addr) => {
-      const log = [];
-      function setVal(el, v) {
-        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-        s.call(el, v);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-      const name = document.querySelector("#billingName, input[autocomplete='name'], input[placeholder*='Name' i]");
-      if (name) { name.focus(); setVal(name, addr.name); log.push("name-ok"); } else log.push("name-MISS");
-      const country = document.querySelector("#billingCountry, select[autocomplete='country']");
-      if (country) { country.value = addr.country; country.dispatchEvent(new Event("change", { bubbles: true })); log.push("country-ok"); } else log.push("country-MISS");
+    // Fill form using REAL keyboard input (page.type) — not evaluate setVal
+    // React/Stripe ignores native setters, only responds to real key events
+    console.log("[AutoCheckout] Filling name & country with real typing...");
+
+    // Helper: clear field and type
+    async function clearAndType(selector, value) {
+      try {
+        await page.waitForSelector(selector, { timeout: 5000 });
+        await page.click(selector, { clickCount: 3 });
+        await page.keyboard.press('Backspace');
+        await page.type(selector, value, { delay: 20 });
+        return true;
+      } catch { return false; }
+    }
+
+    // Name
+    const nameOk = await clearAndType("#billingName", address.name)
+      || await clearAndType("input[autocomplete='name']", address.name);
+    console.log("[AutoCheckout] Name:", nameOk ? "OK" : "MISS");
+
+    // Country (select)
+    let countryOk = false;
+    for (const sel of ["#billingCountry", "select[autocomplete='country']"]) {
+      try {
+        await page.waitForSelector(sel, { timeout: 3000 });
+        await page.select(sel, address.country);
+        countryOk = true;
+        break;
+      } catch {}
+    }
+    console.log("[AutoCheckout] Country:", countryOk ? "OK" : "MISS");
+    await delay(1500);
+
+    // Click "Enter address manually"
+    const manualOk = await page.evaluate(() => {
       for (const l of document.querySelectorAll("a, button, span")) {
-        if (l.textContent?.trim().toLowerCase().includes("enter address manually")) { l.click(); log.push("manual-ok"); break; }
+        if (l.textContent?.trim().toLowerCase().includes("enter address manually")) { l.click(); return true; }
       }
-      return log;
-    }, address);
-    console.log("[AutoCheckout] Phase2:", p2.join(", "));
+      return false;
+    });
+    console.log("[AutoCheckout] Manual:", manualOk ? "OK" : "MISS");
     await delay(2000);
     await page.screenshot({ path: path.join(debugDir, "03_manual.png"), fullPage: true });
 
-    // Fill address fields + checkbox
-    console.log("[AutoCheckout] Filling address...");
-    const p3 = await page.evaluate((addr) => {
-      const log = [];
-      function setVal(el, v) {
-        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-        s.call(el, v);
-        el.dispatchEvent(new Event("input", { bubbles: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
+    // Address fields
+    console.log("[AutoCheckout] Filling address with real typing...");
+    const a1Ok = await clearAndType("#billingAddressLine1", address.addressLine1)
+      || await clearAndType("input[autocomplete='address-line1']", address.addressLine1);
+    console.log("[AutoCheckout] Addr1:", a1Ok ? "OK" : "MISS");
+
+    if (address.addressLine2) {
+      await clearAndType("#billingAddressLine2", address.addressLine2)
+        || await clearAndType("input[autocomplete='address-line2']", address.addressLine2);
+    }
+
+    const cityOk = await clearAndType("#billingLocality", address.city)
+      || await clearAndType("input[autocomplete='address-level2']", address.city);
+    console.log("[AutoCheckout] City:", cityOk ? "OK" : "MISS");
+
+    const zipOk = await clearAndType("#billingPostal", address.zip)
+      || await clearAndType("input[autocomplete='postal-code']", address.zip);
+    console.log("[AutoCheckout] ZIP:", zipOk ? "OK" : "MISS");
+
+    // State (select)
+    if (address.state) {
+      for (const sel of ["#billingAdministrativeArea", "select[autocomplete='address-level1']"]) {
+        try {
+          await page.waitForSelector(sel, { timeout: 3000 });
+          await page.select(sel, address.state);
+          console.log("[AutoCheckout] State: OK");
+          break;
+        } catch {}
       }
-      const a1 = document.querySelector("#billingAddressLine1, input[autocomplete='address-line1'], input[placeholder*='Address line 1' i]");
-      if (a1) { a1.focus(); setVal(a1, addr.addressLine1); log.push("addr1-ok"); } else log.push("addr1-MISS");
-      if (addr.addressLine2) { const a2 = document.querySelector("#billingAddressLine2, input[autocomplete='address-line2']"); if (a2) setVal(a2, addr.addressLine2); }
-      const city = document.querySelector("#billingLocality, input[autocomplete='address-level2'], input[placeholder*='City' i]");
-      if (city) { city.focus(); setVal(city, addr.city); log.push("city-ok"); } else log.push("city-MISS");
-      const zip = document.querySelector("#billingPostal, input[autocomplete='postal-code'], input[placeholder*='ZIP' i]");
-      if (zip) { zip.focus(); setVal(zip, addr.zip); log.push("zip-ok"); } else log.push("zip-MISS");
-      if (addr.state) {
-        const st = document.querySelector("#billingAdministrativeArea, select[autocomplete='address-level1']");
-        if (st) { st.value = addr.state; st.dispatchEvent(new Event("change", { bubbles: true })); log.push("state-ok"); } else log.push("state-MISS");
+    }
+    await delay(500);
+
+    // Checkbox — use real click
+    try {
+      const cbSel = "input[type='checkbox']";
+      const isChecked = await page.$eval(cbSel, el => el.checked);
+      if (!isChecked) {
+        await page.click(cbSel);
+        console.log("[AutoCheckout] Checkbox: clicked");
       }
-      const cb = document.querySelector("input[type='checkbox']");
-      if (cb && !cb.checked) { cb.click(); log.push("cb-ok"); }
-      const rcb = document.querySelector("[role='checkbox']");
-      if (rcb) { rcb.click(); log.push("rcb-ok"); }
-      return log;
-    }, address);
-    console.log("[AutoCheckout] Phase3:", p3.join(", "));
+    } catch {
+      // Try role=checkbox
+      try { await page.click("[role='checkbox']"); console.log("[AutoCheckout] Role checkbox: clicked"); } catch {}
+    }
     await delay(1000);
     await page.screenshot({ path: path.join(debugDir, "04_filled.png"), fullPage: true });
 
