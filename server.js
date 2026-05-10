@@ -426,6 +426,34 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     await delay(3000);
     await ss(page, "02_gopay_clicked");
 
+    // ── DEBUG: Dump all form elements ──
+    const domDump = await page.evaluate(() => {
+      const els = {};
+      els.inputs = Array.from(document.querySelectorAll("input")).map(e => ({
+        type: e.type, id: e.id, name: e.name, placeholder: e.placeholder,
+        autocomplete: e.autocomplete, visible: e.offsetParent !== null, value: e.value
+      }));
+      els.selects = Array.from(document.querySelectorAll("select")).map(e => ({
+        id: e.id, name: e.name, autocomplete: e.autocomplete, optionCount: e.options.length
+      }));
+      els.buttons = Array.from(document.querySelectorAll("button")).map(e => ({
+        text: e.textContent?.trim().substring(0, 40), type: e.type, disabled: e.disabled
+      }));
+      els.links = Array.from(document.querySelectorAll("a")).map(e => ({
+        text: e.textContent?.trim().substring(0, 50), href: e.href?.substring(0, 50)
+      }));
+      els.checkboxes = Array.from(document.querySelectorAll("[role='checkbox'], input[type='checkbox']")).map(e => ({
+        tag: e.tagName, id: e.id, checked: e.checked, ariaChecked: e.getAttribute('aria-checked')
+      }));
+      els.iframes = Array.from(document.querySelectorAll("iframe")).map(e => ({
+        src: e.src?.substring(0, 80), id: e.id, name: e.name
+      }));
+      return els;
+    });
+    console.log("[AutoCheckout] === DOM DUMP ===");
+    console.log(JSON.stringify(domDump, null, 2));
+    console.log("[AutoCheckout] === END DUMP ===");
+
     // ── Step 3: Fill Name ──
     console.log("[AutoCheckout] Filling name:", address.name);
     const nameSelectors = ["#billingName", "input[autocomplete='name']", "input[placeholder*='Name' i]", "input[name*='name' i]"];
