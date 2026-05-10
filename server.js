@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { COUNTRIES_LIST, STATES } = require("./countries");
+const whatsapp = require("./whatsapp");
 
 const app = express();
 const PORT = 3000;
@@ -543,7 +544,176 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`\n🚀 Diaa Store GPT Pay running at http://localhost:${PORT}\n`);
+// ══════════════════════════════════════════════════════════════════════════
+// WHATSAPP — OTP Listener endpoints
+// ══════════════════════════════════════════════════════════════════════════
+
+// WhatsApp status
+app.get("/api/whatsapp/status", requireAuth, (req, res) => {
+  res.json(whatsapp.getStatus());
 });
 
+// WhatsApp QR code for scanning
+app.get("/api/whatsapp/qr", requireAuth, (req, res) => {
+  const qr = whatsapp.getQRImage();
+  if (!qr) return res.json({ ready: whatsapp.ready, qr: null, message: whatsapp.ready ? "Already connected" : "Waiting for QR..." });
+  res.json({ ready: false, qr });
+});
+
+// Get latest OTP
+app.get("/api/whatsapp/otp", requireAuth, (req, res) => {
+  const otp = whatsapp.getLatestOTP();
+  res.json({ otp });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// CANCEL SUBSCRIPTION — ChatGPT backend API
+// ══════════════════════════════════════════════════════════════════════════
+
+async function cancelSubscription(accessToken, proxy) {
+  console.log("[CancelSub] Cancelling subscription...");
+
+  const cancelPayload = JSON.stringify({
+    cancellation_reason: "too_expensive",
+    is_cancel_immediate: false,
+  });
+
+  // Try multiple known cancel endpoints
+  const endpoints = [
+    { method: "PATCH", url: "https://chatgpt.com/backend-api/accounts/me/subscription" },
+    { method: "POST", url: "https://chatgpt.com/backend-api/subscription/cancel" },
+    { method: "PATCH", url: "https://chatgpt.com/backend-api/payments/subscription" },
+  ];
+
+  for (const ep of endpoints) {
+    console.log(`[CancelSub] Trying ${ep.method} ${ep.url}`);
+    try {
+      const result = await new Promise((resolve, reject) => {
+        const args = buildCurlArgs(ep.url, accessToken, cancelPayload, proxy, ep.method);
+        execFile(CURL_CHROME, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+          if (err) return reject(err);
+          try { resolve(JSON.parse(stdout)); } catch { resolve({ raw: stdout.substring(0, 500) }); }
+        });
+      });
+
+      console.log("[CancelSub] Response:", JSON.stringify(result).substring(0, 300));
+
+      // Check if successful
+      if (!result.error && !result.detail) {
+        console.log("[CancelSub] ✅ Success!");
+        return { success: true, data: result };
+      }
+    } catch (e) {
+      console.log("[CancelSub] Error:", e.message);
+    }
+  }
+
+  return { success: false, error: "All cancel endpoints failed" };
+}
+
+// Helper: build curl args with custom HTTP method
+function buildCurlArgs(url, token, body, proxy, method = "POST") {
+  const args = [
+    url,
+    "-X", method,
+    "-H", "Content-Type: application/json",
+    "-H", `Authorization: Bearer ${token}`,
+    "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "-H", "Origin: https://chatgpt.com",
+    "-H", "Referer: https://chatgpt.com/",
+    "--data-raw", body,
+    "--max-time", "30",
+    "--compressed",
+  ];
+  if (proxy) { args.push("--proxy", proxy); args.push("-k"); }
+  return args;
+}
+
+// Cancel subscription endpoint
+app.post("/api/cancel-subscription", requireAuth, async (req, res) => {
+  const { accessToken } = req.body;
+  if (!accessToken) return res.status(400).json({ error: "accessToken required" });
+
+  const cfg = loadConfig();
+  const proxy = req.body.proxy || cfg.globalProxy || null;
+
+  try {
+    const result = await cancelSubscription(accessToken, proxy);
+    return res.json(result);
+  } catch (err) {
+    console.error("[CancelSub] ERROR:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// FULL CHECKOUT — End-to-end automation
+// ══════════════════════════════════════════════════════════════════════════
+
+app.post("/api/full-checkout", requireAuth, async (req, res) => {
+  const { checkoutUrl, accessToken, proxy } = req.body;
+  if (!checkoutUrl) return res.status(400).json({ error: "checkoutUrl required" });
+
+  const cfg = loadConfig();
+  const addresses = cfg.addresses || [];
+  if (addresses.length === 0) return res.status(400).json({ error: "No addresses" });
+
+  const address = addresses[addressRotationIndex % addresses.length];
+  addressRotationIndex++;
+
+  const steps = { stripe: null, gopay: null, cancel: null };
+
+  console.log(`\n${'━'.repeat(60)}`);
+  console.log(`[FullCheckout] Starting full automation`);
+  console.log(`${'━'.repeat(60)}`);
+
+  // Step 1: Stripe → Midtrans link
+  try {
+    console.log("[FullCheckout] Step 1: Stripe → Midtrans...");
+    steps.stripe = await runAutoCheckout(checkoutUrl, address);
+    if (!steps.stripe.success) {
+      return res.json({ success: false, steps, error: "Stripe checkout failed" });
+    }
+    console.log("[FullCheckout] Step 1: ✅ Got GoPay URL");
+  } catch (err) {
+    return res.json({ success: false, steps, error: `Stripe: ${err.message}` });
+  }
+
+  // Step 2: GoPay automation (TODO — will be implemented after Midtrans API capture)
+  steps.gopay = { status: "manual", url: steps.stripe.gopayUrl };
+  console.log("[FullCheckout] Step 2: GoPay URL ready (manual for now):", steps.stripe.gopayUrl);
+
+  // Step 3: Cancel subscription
+  if (accessToken) {
+    try {
+      console.log("[FullCheckout] Step 3: Cancelling subscription...");
+      const useProxy = proxy || cfg.globalProxy || null;
+      steps.cancel = await cancelSubscription(accessToken, useProxy);
+      console.log("[FullCheckout] Step 3:", steps.cancel.success ? "✅ Cancelled" : "❌ Failed");
+    } catch (err) {
+      steps.cancel = { success: false, error: err.message };
+    }
+  }
+
+  console.log(`[FullCheckout] Done!\n`);
+
+  return res.json({
+    success: true,
+    steps,
+    gopayUrl: steps.stripe.gopayUrl,
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// START SERVER + WhatsApp
+// ══════════════════════════════════════════════════════════════════════════
+
+app.listen(PORT, () => {
+  console.log(`\n🚀 Diaa Store GPT Pay running at http://localhost:${PORT}\n`);
+
+  // Initialize WhatsApp in background
+  whatsapp.initialize().catch(err => {
+    console.error("[WhatsApp] Failed to start:", err.message);
+    console.log("[WhatsApp] Server will continue without WhatsApp.");
+  });
+});
