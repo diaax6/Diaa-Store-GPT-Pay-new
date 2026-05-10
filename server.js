@@ -879,24 +879,26 @@ app.post("/api/full-checkout", requireAuth, async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`\n🚀 Diaa Store GPT Pay running at http://localhost:${PORT}\n`);
 
-  // Auto-initialize WhatsApp clients from gopay accounts
+  // Only auto-reconnect WhatsApp clients that already have auth sessions
   const cfg = loadConfig();
   const accounts = cfg.gopayAccounts || [];
 
-  if (accounts.length > 0) {
-    console.log(`[WhatsApp] Auto-initializing ${accounts.length} client(s)...`);
-    for (let i = 0; i < accounts.length; i++) {
-      const id = `wa_${i}`;
+  for (let i = 0; i < accounts.length; i++) {
+    const id = `wa_${i}`;
+    const authDir = path.join(process.cwd(), `baileys-auth-${id}`);
+    // Only init if already paired (has auth files)
+    if (fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0) {
+      console.log(`[WhatsApp] Auto-reconnecting ${id} (${accounts[i].phone})...`);
       whatsapp.addClient(id, accounts[i].phone).catch(err => {
         console.error(`[WhatsApp] Client ${id} failed:`, err.message);
       });
-      // Wait 5s between inits to avoid resource issues
       if (i < accounts.length - 1) await new Promise(r => setTimeout(r, 5000));
+    } else {
+      console.log(`[WhatsApp] ${id} not paired yet — use /api/whatsapp/add to pair`);
     }
-  } else {
-    // Legacy: init single client
-    whatsapp.initialize().catch(err => {
-      console.error("[WhatsApp] Failed to start:", err.message);
-    });
+  }
+
+  if (accounts.length === 0) {
+    console.log("[WhatsApp] No accounts configured — use /api/whatsapp/add to add");
   }
 });

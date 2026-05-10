@@ -43,27 +43,30 @@ class WhatsAppClient extends EventEmitter {
     if (!fs.existsSync(this.authDir)) fs.mkdirSync(this.authDir, { recursive: true });
 
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+    this._isRegistered = !!state.creds.registered;
+    this._usePairingCode = usePairingCode;
+    this._pairingPhone = pairingPhone;
 
     this.sock = makeWASocket({
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      printQRInTerminal: !usePairingCode,
+      printQRInTerminal: false,
       logger,
       browser: ["Diaa-GPT-Pay", "Chrome", "1.0.0"],
       generateHighQualityLinkPreview: false,
     });
 
-    // Request pairing code instead of QR
+    // Request pairing code for fresh sessions
     if (usePairingCode && pairingPhone && !state.creds.registered) {
+      // Wait for socket to be ready enough for pairing
+      await new Promise((r) => setTimeout(r, 5000));
       try {
-        // Wait for connection to be ready for pairing
-        await new Promise((r) => setTimeout(r, 3000));
         const code = await this.sock.requestPairingCode(pairingPhone);
         this.pairingCode = code;
         console.log(`[WA:${this.id}] 🔗 Pairing code: ${code}`);
-        console.log(`[WA:${this.id}] Enter this on WhatsApp → Linked Devices → Link with phone number`);
+        console.log(`[WA:${this.id}] Enter on WhatsApp → Linked Devices → Link with phone number`);
         this.emit("pairing_code", code);
       } catch (err) {
         console.error(`[WA:${this.id}] Pairing error:`, err.message);
@@ -99,12 +102,16 @@ class WhatsAppClient extends EventEmitter {
 
         console.log(
           `[WA:${this.id}] Disconnected (code: ${statusCode})`,
-          shouldReconnect ? "— reconnecting..." : "— logged out"
+          shouldReconnect ? "— will reconnect" : "— logged out"
         );
 
-        if (shouldReconnect && this.reconnectAttempts < this.maxReconnects) {
+        // Only reconnect if already registered (not fresh sessions)
+        if (shouldReconnect && this._isRegistered && this.reconnectAttempts < this.maxReconnects) {
           this.reconnectAttempts++;
-          setTimeout(() => this.initialize(false), 3000);
+          console.log(`[WA:${this.id}] Reconnecting in 5s... (attempt ${this.reconnectAttempts})`);
+          setTimeout(() => this.initialize(false), 5000);
+        } else if (!this._isRegistered) {
+          console.log(`[WA:${this.id}] Fresh session — waiting for pairing/QR. No auto-reconnect.`);
         }
       }
     });
