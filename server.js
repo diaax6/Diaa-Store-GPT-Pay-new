@@ -500,7 +500,22 @@ async function runAutoCheckout(checkoutUrl, address) {
     console.log("[AutoCheckout] City:", cityOk ? "OK" : "MISS");
 
     const zipOk = await clearAndType("#billingPostal", address.zip)
-      || await clearAndType("input[autocomplete='postal-code']", address.zip);
+      || await clearAndType("input[autocomplete='postal-code']", address.zip)
+      || await clearAndType("input[placeholder*='ZIP' i]", address.zip)
+      || await clearAndType("input[placeholder*='Postal' i]", address.zip)
+      || await clearAndType("input[name*='postal' i]", address.zip)
+      || await clearAndType("input[name*='zip' i]", address.zip);
+    if (!zipOk) {
+      // Debug: dump all inputs to find the right selector
+      const inputs = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll("input, select")).map(e => ({
+          tag: e.tagName, id: e.id, name: e.name, type: e.type,
+          placeholder: e.placeholder, autocomplete: e.autocomplete,
+          value: e.value?.substring(0, 30), visible: e.offsetParent !== null
+        }));
+      });
+      console.log("[AutoCheckout] ZIP MISS — All inputs:", JSON.stringify(inputs, null, 2));
+    }
     console.log("[AutoCheckout] ZIP:", zipOk ? "OK" : "MISS");
 
     // State (select)
