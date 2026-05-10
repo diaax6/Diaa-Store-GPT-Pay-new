@@ -47,6 +47,8 @@ class WhatsAppClient extends EventEmitter {
     this._usePairingCode = usePairingCode;
     this._pairingPhone = pairingPhone;
 
+    console.log(`[WA:${this.id}] Registered: ${this._isRegistered}, PairingCode: ${usePairingCode}`);
+
     this.sock = makeWASocket({
       auth: {
         creds: state.creds,
@@ -58,22 +60,7 @@ class WhatsAppClient extends EventEmitter {
       generateHighQualityLinkPreview: false,
     });
 
-    // Request pairing code for fresh sessions
-    if (usePairingCode && pairingPhone && !state.creds.registered) {
-      // Wait for socket to be ready enough for pairing
-      await new Promise((r) => setTimeout(r, 5000));
-      try {
-        const code = await this.sock.requestPairingCode(pairingPhone);
-        this.pairingCode = code;
-        console.log(`[WA:${this.id}] 🔗 Pairing code: ${code}`);
-        console.log(`[WA:${this.id}] Enter on WhatsApp → Linked Devices → Link with phone number`);
-        this.emit("pairing_code", code);
-      } catch (err) {
-        console.error(`[WA:${this.id}] Pairing error:`, err.message);
-      }
-    }
-
-    // Save credentials on update
+    // Register ALL event listeners FIRST
     this.sock.ev.on("creds.update", saveCreds);
 
     // Connection updates
@@ -146,6 +133,23 @@ class WhatsAppClient extends EventEmitter {
         }
       }
     });
+
+    // ── Request pairing code AFTER all events are registered ──
+    if (usePairingCode && pairingPhone && !state.creds.registered) {
+      console.log(`[WA:${this.id}] Requesting pairing code for ${pairingPhone}...`);
+      // Wait for socket handshake
+      await new Promise((r) => setTimeout(r, 5000));
+      try {
+        const code = await this.sock.requestPairingCode(pairingPhone);
+        this.pairingCode = code;
+        console.log(`[WA:${this.id}] 🔗 PAIRING CODE: ${code}`);
+        console.log(`[WA:${this.id}] Enter on WhatsApp → Linked Devices → Link with phone number`);
+        this.emit("pairing_code", code);
+      } catch (err) {
+        console.error(`[WA:${this.id}] ❌ Pairing error:`, err.message);
+        console.error(`[WA:${this.id}] Full error:`, err);
+      }
+    }
   }
 
   // Extract text from ANY message type (regular, template, button, etc.)
