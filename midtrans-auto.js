@@ -28,7 +28,17 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
   // Capture ALL API requests for future Direct API migration
   const capturedAPIs = [];
 
-  const puppeteer = require("puppeteer");
+  let puppeteer;
+  try {
+    puppeteer = require("puppeteer-extra");
+    const StealthPlugin = require("puppeteer-extra-plugin-stealth");
+    puppeteer.use(StealthPlugin());
+    console.log("[Midtrans] Using stealth mode");
+  } catch {
+    puppeteer = require("puppeteer");
+    console.log("[Midtrans] Stealth not available, using plain puppeteer");
+  }
+
   const browser = await puppeteer.launch({
     headless: "new",
     args: [
@@ -36,6 +46,7 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
+      "--disable-blink-features=AutomationControlled",
     ],
   });
 
@@ -46,6 +57,11 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
     const page = await browser.newPage();
     await page.setViewport({ width: 430, height: 932 });
     await page.setUserAgent("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+    
+    // Hide webdriver
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
 
     // ── Network Interception ────────────────────────────────────────────
     page.on("request", (req) => {
@@ -80,8 +96,8 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
 
     // ── Step 1: Load page ────────────────────────────────────────────────
     console.log("[Midtrans] Loading page...");
-    await page.goto(midtransUrl, { waitUntil: "networkidle2", timeout: 30000 });
-    await delay(3000);
+    await page.goto(midtransUrl, { waitUntil: "networkidle2", timeout: 60000 });
+    await delay(5000); // Wait for React SPA to fully render
     await page.screenshot({ path: path.join(debugDir, "mt_01_loaded.png"), fullPage: true });
     console.log("[Midtrans] Page loaded!");
 
