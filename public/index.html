@@ -260,6 +260,22 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           </button>
         </div>
+
+        <!-- GoPay Auto-Activate Button -->
+        <button class="btn btn-gopay" id="btnActivateGopay" onclick="doActivateGopay()" style="margin-top:12px; background:linear-gradient(135deg,#10b981,#059669);">
+          <span id="activateGopaySpinner" class="spinner hidden"></span>
+          🚀 Activate GoPay (Auto Phone + OTP + PIN)
+        </button>
+
+        <!-- GoPay Activation Result -->
+        <div id="gopayActivateResult" class="hidden" style="margin-top:10px; padding:10px; border-radius:8px; font-size:13px;"></div>
+
+        <!-- Cancel Subscription Button -->
+        <button class="btn" id="btnCancelSub" onclick="doCancelSub()" style="margin-top:8px; background:linear-gradient(135deg,#ef4444,#dc2626); width:100%;">
+          <span id="cancelSubSpinner" class="spinner hidden"></span>
+          🚫 Cancel Subscription
+        </button>
+        <div id="cancelSubResult" class="hidden" style="margin-top:10px; padding:10px; border-radius:8px; font-size:13px;"></div>
       </div>
     </main>
 

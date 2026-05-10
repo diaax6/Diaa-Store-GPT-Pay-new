@@ -596,6 +596,105 @@
 
   $("btnDismiss").onclick = () => $("errorBar").classList.add("hidden");
 
+  // ── GoPay Activate ────────────────────────────────────────────
+  window.doActivateGopay = async function () {
+    const midtransUrl = $("gopayLink").value;
+    if (!midtransUrl || !midtransUrl.includes("midtrans.com")) {
+      alert("No valid Midtrans URL. Run Auto Checkout first.");
+      return;
+    }
+
+    const btn = $("btnActivateGopay");
+    const resultDiv = $("gopayActivateResult");
+    const spinner = $("activateGopaySpinner");
+
+    btn.disabled = true;
+    spinner.classList.remove("hidden");
+    resultDiv.className = "hidden";
+
+    try {
+      const res = await fetch("/api/gopay/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ midtransUrl }),
+      });
+      const data = await res.json();
+
+      resultDiv.classList.remove("hidden");
+      if (data.success) {
+        resultDiv.style.background = "rgba(16,185,129,0.15)";
+        resultDiv.style.color = "#10b981";
+        resultDiv.innerHTML = `✅ GoPay activated! Captured ${data.capturedAPIs || 0} API calls.`;
+      } else {
+        resultDiv.style.background = "rgba(239,68,68,0.15)";
+        resultDiv.style.color = "#ef4444";
+        resultDiv.innerHTML = `❌ ${data.error || "Activation failed"}`;
+      }
+    } catch (err) {
+      resultDiv.classList.remove("hidden");
+      resultDiv.style.background = "rgba(239,68,68,0.15)";
+      resultDiv.style.color = "#ef4444";
+      resultDiv.innerHTML = `❌ ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      spinner.classList.add("hidden");
+    }
+  };
+
+  // ── Cancel Subscription ────────────────────────────────────────
+  window.doCancelSub = async function () {
+    const sessionJson = $("sessionInput").value.trim();
+    if (!sessionJson) {
+      alert("Session JSON is required to cancel subscription.");
+      return;
+    }
+
+    // Extract access token from session JSON
+    let accessToken;
+    try {
+      const parsed = JSON.parse(sessionJson);
+      accessToken = parsed.accessToken || parsed.access_token || sessionJson;
+    } catch {
+      accessToken = sessionJson;
+    }
+
+    const btn = $("btnCancelSub");
+    const resultDiv = $("cancelSubResult");
+    const spinner = $("cancelSubSpinner");
+
+    btn.disabled = true;
+    spinner.classList.remove("hidden");
+    resultDiv.className = "hidden";
+
+    try {
+      const res = await fetch("/api/cancel-subscription", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accessToken }),
+      });
+      const data = await res.json();
+
+      resultDiv.classList.remove("hidden");
+      if (data.success) {
+        resultDiv.style.background = "rgba(16,185,129,0.15)";
+        resultDiv.style.color = "#10b981";
+        resultDiv.innerHTML = "✅ Subscription cancelled!";
+      } else {
+        resultDiv.style.background = "rgba(239,68,68,0.15)";
+        resultDiv.style.color = "#ef4444";
+        resultDiv.innerHTML = `❌ ${data.error || "Cancel failed"}`;
+      }
+    } catch (err) {
+      resultDiv.classList.remove("hidden");
+      resultDiv.style.background = "rgba(239,68,68,0.15)";
+      resultDiv.style.color = "#ef4444";
+      resultDiv.innerHTML = `❌ ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      spinner.classList.add("hidden");
+    }
+  };
+
   // ── Init ────────────────────────────────────────────────────
   checkAuth();
 
