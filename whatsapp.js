@@ -19,7 +19,7 @@ const EventEmitter = require("events");
 const path = require("path");
 const fs = require("fs");
 
-const logger = pino({ level: "silent" }); // Suppress baileys logs
+const logger = pino({ level: "warn" }); // Show warnings from baileys
 
 // ══════════════════════════════════════════════════════════════════════════
 // Single WhatsApp Client (Baileys)
@@ -59,10 +59,11 @@ class WhatsAppClient extends EventEmitter {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
-      printQRInTerminal: false,
+      printQRInTerminal: true,
       logger,
-      browser: ["Diaa-GPT-Pay", "Chrome", "1.0.0"],
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
       generateHighQualityLinkPreview: false,
+      markOnlineOnConnect: false,
     });
 
     // Register ALL event listeners FIRST
