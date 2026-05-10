@@ -140,6 +140,28 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
 
       await delay(3000);
       await page.screenshot({ path: path.join(debugDir, "mt_03_after_phone.png"), fullPage: true });
+
+      // Check if we captured the activation_link_url from the linking API
+      const linkingAPI = capturedAPIs.find(a => a.url?.includes("/linking") && a.response);
+      if (linkingAPI && linkingAPI.response) {
+        try {
+          const linkResp = JSON.parse(linkingAPI.response.body);
+          if (linkResp.activation_link_url) {
+            console.log("[Midtrans] Got activation URL:", linkResp.activation_link_url);
+            console.log("[Midtrans] Navigating to GoPay auth page...");
+            await page.goto(linkResp.activation_link_url, { waitUntil: "networkidle2", timeout: 30000 });
+            await delay(5000);
+            await page.screenshot({ path: path.join(debugDir, "mt_03b_gopay_auth.png"), fullPage: true });
+            console.log("[Midtrans] GoPay auth page loaded!");
+            
+            // Dump the page content to see what we're working with
+            const pageContent = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "");
+            console.log("[Midtrans] Page text:", pageContent.substring(0, 300));
+          }
+        } catch (e) {
+          console.log("[Midtrans] Parse error:", e.message);
+        }
+      }
     } else {
       console.log("[Midtrans] Phone input not found — dumping inputs...");
       await dumpInputs(page);
