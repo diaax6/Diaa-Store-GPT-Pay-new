@@ -571,7 +571,7 @@ app.post("/api/gopay/config", requireAdmin, (req, res) => {
 });
 
 // Test Midtrans automation with a URL
-app.post("/api/gopay/test", requireAdmin, async (req, res) => {
+app.post("/api/gopay/test", requireAuth, async (req, res) => {
   const { midtransUrl } = req.body;
   if (!midtransUrl) return res.status(400).json({ error: "midtransUrl required" });
 
