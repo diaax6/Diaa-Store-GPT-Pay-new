@@ -366,6 +366,13 @@ app.post("/api/generate-link", requireAuth, async (req, res) => {
 async function runAutoCheckout(checkoutUrl, address, proxy) {
   const puppeteer = require("puppeteer");
 
+  // Debug screenshots directory
+  const debugDir = path.join(__dirname, "public", "debug");
+  if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+  const ss = async (page, name) => {
+    try { await page.screenshot({ path: path.join(debugDir, `${name}.png`), fullPage: true }); } catch {}
+  };
+
   const launchArgs = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
@@ -400,6 +407,7 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     console.log("[AutoCheckout] Opening:", checkoutUrl.substring(0, 80) + "...");
     await page.goto(checkoutUrl, { waitUntil: "networkidle2", timeout: 45000 });
     await delay(4000);
+    await ss(page, "01_loaded");
 
     // ── Step 2: Click GoPay ──
     console.log("[AutoCheckout] Selecting GoPay...");
@@ -416,6 +424,7 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     });
     console.log(`[AutoCheckout] GoPay: ${gopayClicked || "NOT FOUND"}`);
     await delay(3000);
+    await ss(page, "02_gopay_clicked");
 
     // ── Step 3: Fill Name ──
     console.log("[AutoCheckout] Filling name:", address.name);
@@ -470,6 +479,7 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     });
     console.log(`[AutoCheckout] Manual address link: ${manualClicked || "NOT FOUND (fields may already be visible)"}`);
     await delay(2000);
+    await ss(page, "03_manual_address");
 
     // ── Step 6: Fill Address Line 1 ──
     console.log("[AutoCheckout] Filling address line 1:", address.addressLine1);
@@ -550,6 +560,8 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
       await delay(500);
     }
 
+    await ss(page, "04_form_filled");
+
     // ── Step 11: Handle terms checkbox ──
     console.log("[AutoCheckout] Checking terms checkbox...");
     // First scroll down to make checkbox visible
@@ -627,6 +639,7 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
       }
     } catch {}
     await delay(1000);
+    await ss(page, "05_checkbox_done");
 
     // ── Step 12: Scroll down and Click Subscribe ──
     console.log("[AutoCheckout] Clicking Subscribe...");
@@ -651,8 +664,21 @@ async function runAutoCheckout(checkoutUrl, address, proxy) {
     console.log(`[AutoCheckout] Subscribe: ${subClicked || "NOT FOUND"}`);
 
     if (!subClicked) {
-      throw new Error("Could not find Subscribe button");
+      await ss(page, "06_subscribe_NOT_FOUND");
+      // Dump page HTML for debugging
+      const html = await page.content();
+      const allButtons = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('button')).map(b => ({
+          text: b.textContent?.trim().substring(0, 50),
+          type: b.type,
+          disabled: b.disabled,
+          visible: b.offsetParent !== null
+        }));
+      });
+      console.log("[AutoCheckout] All buttons on page:", JSON.stringify(allButtons, null, 2));
+      throw new Error("Could not find Subscribe button — check /debug/ screenshots");
     }
+    await ss(page, "06_subscribe_clicked");
 
     // ── Step 13: Wait for redirect to midtrans/gopay ──
     console.log("[AutoCheckout] Waiting for GoPay redirect...");
