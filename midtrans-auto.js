@@ -109,9 +109,9 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
 
       // Click submit/continue button — try many labels
       const clicked = await clickButton(page, [
-        "Lanjutkan", "Lanjut", "Continue", "Next", "Submit",
-        "Konfirmasi", "Verify", "Kirim", "Link", "Hubungkan",
-        "Sambungkan", "Connect", "Proceed", "OK",
+        "Link and pay", "Link and Pay", "Lanjutkan", "Lanjut",
+        "Continue", "Next", "Submit", "Konfirmasi", "Verify",
+        "Kirim", "Link", "Hubungkan", "Connect", "Proceed", "OK",
       ]);
 
       // If no button found, try pressing Enter
