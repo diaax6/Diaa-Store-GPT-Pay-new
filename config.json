@@ -1,5 +1,7 @@
 {
   "adminPassword": "diaa2026",
   "userPassword": "gptpay",
-  "globalProxy": ""
+  "globalProxy": "",
+  "checkoutProxy": "",
+  "addresses": []
 }

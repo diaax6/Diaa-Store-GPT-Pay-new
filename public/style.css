@@ -17,6 +17,10 @@
   --green-dim: rgba(34, 197, 94, 0.12);
   --yellow: #f59e0b;
   --yellow-dim: rgba(245, 158, 11, 0.12);
+  --amber: #f59e0b;
+  --amber-dim: rgba(245, 158, 11, 0.12);
+  --cyan: #06b6d4;
+  --cyan-dim: rgba(6, 182, 212, 0.12);
   --error: #ef4444;
   --error-dim: rgba(239, 68, 68, 0.08);
   --radius: 14px;
@@ -86,6 +90,7 @@ body {
   font-family: inherit; font-size: 0.75rem; font-weight: 600;
   text-decoration: none;
   transition: all .2s;
+  cursor: pointer;
 }
 .btn-session-link:hover {
   background: var(--red-dim);
@@ -246,6 +251,17 @@ body {
 }
 @keyframes shimmer { 0%{left:-100%;} 100%{left:100%;} }
 
+/* ── GoPay Button ──────────────────────────────────────────── */
+.btn-gopay {
+  background: linear-gradient(135deg, #f59e0b, #ef4444);
+  color: #fff;
+  box-shadow: 0 4px 18px rgba(245, 158, 11, 0.3);
+  margin-top: 10px;
+}
+.btn-gopay:hover { transform:translateY(-1px); box-shadow:0 6px 24px rgba(245,158,11,0.4); }
+.btn-gopay:active { transform:translateY(0); }
+.btn-gopay:disabled { opacity:0.4; cursor:not-allowed; transform:none; box-shadow:none; }
+
 /* ── Result ────────────────────────────────────────────────── */
 .result-section {
   padding: 16px;
@@ -283,8 +299,9 @@ body {
 .btn-copy:hover { background:rgba(34,197,94,0.2); }
 .btn-copy.copied { background:var(--green)!important; color:#fff!important; }
 
-.result-meta {
+.result-meta, .gopay-meta {
   display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px;
+  margin-bottom: 10px;
 }
 .meta-chip {
   padding:8px 10px;
@@ -293,6 +310,21 @@ body {
 }
 .meta-chip-label { display:block; font-size:0.55rem; font-weight:600; color:var(--text-3); text-transform:uppercase; letter-spacing:0.06em; }
 .meta-chip-value { display:block; font-size:0.72rem; font-weight:600; margin-top:2px; }
+
+/* ── GoPay Result ──────────────────────────────────────────── */
+.gopay-result {
+  border-color: rgba(245, 158, 11, 0.3) !important;
+}
+.gopay-label {
+  color: var(--amber) !important;
+}
+.gopay-link-input {
+  border-color: rgba(245, 158, 11, 0.3) !important;
+  color: var(--amber) !important;
+}
+.gopay-meta {
+  grid-template-columns: 1fr 1fr;
+}
 
 /* ── Error Bar ─────────────────────────────────────────────── */
 .error-bar {
@@ -433,6 +465,89 @@ body {
   animation: fadeIn .3s ease;
 }
 
+/* ── Address Management ────────────────────────────────────── */
+.address-list {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-bottom: 8px;
+}
+.addr-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-3);
+  background: rgba(0,0,0,0.2);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border);
+}
+.addr-card {
+  padding: 10px 12px;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color .2s;
+}
+.addr-card:hover {
+  border-color: rgba(255,51,68,0.2);
+}
+.addr-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.addr-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.addr-actions {
+  display: flex;
+  gap: 4px;
+}
+.addr-btn {
+  width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: all .2s;
+}
+.addr-edit:hover {
+  background: var(--amber-dim);
+  border-color: rgba(245,158,11,0.3);
+}
+.addr-del:hover {
+  background: var(--error-dim);
+  border-color: rgba(239,68,68,0.3);
+}
+.addr-detail {
+  font-size: 0.72rem;
+  color: var(--text);
+  font-weight: 500;
+}
+.addr-sub {
+  font-size: 0.65rem;
+  color: var(--text-2);
+  margin-top: 1px;
+}
+
+/* ── Address Form ──────────────────────────────────────────── */
+.address-form {
+  padding: 12px;
+  background: rgba(0,0,0,0.2);
+  border: 1px solid rgba(255,51,68,0.15);
+  border-radius: var(--radius-sm);
+  margin-top: 8px;
+  animation: fadeIn .3s ease;
+}
+.address-form-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* ── Footer ────────────────────────────────────────────────── */
 .footer { text-align:center; padding:24px 0 8px; font-size:0.68rem; color:var(--text-3); }
 
@@ -442,7 +557,7 @@ body {
 /* ── Responsive ────────────────────────────────────────────── */
 @media (max-width:520px) {
   .config-bar { flex-direction:column; gap:10px; }
-  .result-meta { grid-template-columns:1fr 1fr; }
+  .result-meta, .gopay-meta { grid-template-columns:1fr 1fr; }
   .toast { width:calc(100% - 32px); right:16px; left:16px; }
   .login-card { margin-top: 15vh; }
 }

@@ -21,6 +21,9 @@ function saveConfig(cfg) {
 const sessions = new Map(); // token → { role: "admin"|"user", createdAt }
 const SESSION_TTL = 60 * 60 * 1000; // 1 hour
 
+// Address rotation counter
+let addressRotationIndex = 0;
+
 function createSession(role) {
   const token = crypto.randomBytes(32).toString("hex");
   sessions.set(token, { role, createdAt: Date.now() });
@@ -117,6 +120,7 @@ app.get("/api/admin/config", requireAdmin, (req, res) => {
   const cfg = loadConfig();
   return res.json({
     globalProxy: cfg.globalProxy || "",
+    checkoutProxy: cfg.checkoutProxy || "",
     userPassword: cfg.userPassword || "",
   });
 });
@@ -130,6 +134,15 @@ app.post("/api/admin/proxy", requireAdmin, (req, res) => {
   return res.json({ success: true, globalProxy: cfg.globalProxy });
 });
 
+app.post("/api/admin/checkout-proxy", requireAdmin, (req, res) => {
+  const { proxy } = req.body;
+  const cfg = loadConfig();
+  cfg.checkoutProxy = proxy || "";
+  saveConfig(cfg);
+  console.log(`[Admin] Checkout proxy set to: ${cfg.checkoutProxy || "(none)"}`);
+  return res.json({ success: true, checkoutProxy: cfg.checkoutProxy });
+});
+
 app.post("/api/admin/passwords", requireAdmin, (req, res) => {
   const { adminPassword, userPassword } = req.body;
   const cfg = loadConfig();
@@ -137,6 +150,47 @@ app.post("/api/admin/passwords", requireAdmin, (req, res) => {
   if (userPassword) cfg.userPassword = userPassword;
   saveConfig(cfg);
   return res.json({ success: true });
+});
+
+// ── Address Management ───────────────────────────────────────────────────
+app.get("/api/admin/addresses", requireAdmin, (req, res) => {
+  const cfg = loadConfig();
+  return res.json({ addresses: cfg.addresses || [] });
+});
+
+app.post("/api/admin/addresses", requireAdmin, (req, res) => {
+  const { label, name, country, addressLine1, addressLine2, city, zip, state } = req.body;
+  if (!name || !country || !addressLine1 || !city || !zip) {
+    return res.status(400).json({ error: "name, country, addressLine1, city, zip are required" });
+  }
+  const cfg = loadConfig();
+  if (!cfg.addresses) cfg.addresses = [];
+  cfg.addresses.push({ label: label || `Address ${cfg.addresses.length + 1}`, name, country, addressLine1, addressLine2: addressLine2 || "", city, zip, state: state || "" });
+  saveConfig(cfg);
+  return res.json({ success: true, addresses: cfg.addresses });
+});
+
+app.put("/api/admin/addresses/:index", requireAdmin, (req, res) => {
+  const idx = parseInt(req.params.index, 10);
+  const cfg = loadConfig();
+  if (!cfg.addresses || idx < 0 || idx >= cfg.addresses.length) {
+    return res.status(404).json({ error: "Address not found" });
+  }
+  const { label, name, country, addressLine1, addressLine2, city, zip, state } = req.body;
+  cfg.addresses[idx] = { label: label || cfg.addresses[idx].label, name: name || cfg.addresses[idx].name, country: country || cfg.addresses[idx].country, addressLine1: addressLine1 || cfg.addresses[idx].addressLine1, addressLine2: addressLine2 !== undefined ? addressLine2 : cfg.addresses[idx].addressLine2, city: city || cfg.addresses[idx].city, zip: zip || cfg.addresses[idx].zip, state: state !== undefined ? state : cfg.addresses[idx].state };
+  saveConfig(cfg);
+  return res.json({ success: true, addresses: cfg.addresses });
+});
+
+app.delete("/api/admin/addresses/:index", requireAdmin, (req, res) => {
+  const idx = parseInt(req.params.index, 10);
+  const cfg = loadConfig();
+  if (!cfg.addresses || idx < 0 || idx >= cfg.addresses.length) {
+    return res.status(404).json({ error: "Address not found" });
+  }
+  cfg.addresses.splice(idx, 1);
+  saveConfig(cfg);
+  return res.json({ success: true, addresses: cfg.addresses });
 });
 
 // ── Country configs ───────────────────────────────────────────────────────
@@ -295,6 +349,319 @@ app.post("/api/generate-link", requireAuth, async (req, res) => {
     return res.json(output);
   } catch (err) {
     console.error("Error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// AUTO-CHECKOUT — Puppeteer automation on Stripe hosted checkout
+// ══════════════════════════════════════════════════════════════════════════
+
+async function runAutoCheckout(checkoutUrl, address, proxy) {
+  const puppeteer = require("puppeteer");
+
+  const launchArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--window-size=1280,900",
+  ];
+
+  // Parse proxy for Puppeteer
+  let proxyAuth = null;
+  if (proxy) {
+    try {
+      const pUrl = new URL(proxy);
+      launchArgs.push(`--proxy-server=${pUrl.protocol}//${pUrl.hostname}:${pUrl.port}`);
+      if (pUrl.username) {
+        proxyAuth = { username: decodeURIComponent(pUrl.username), password: decodeURIComponent(pUrl.password || "") };
+      }
+    } catch {
+      // If URL parsing fails, pass proxy as-is
+      launchArgs.push(`--proxy-server=${proxy}`);
+    }
+  }
+
+  console.log("[AutoCheckout] Launching browser...");
+  const browser = await puppeteer.launch({ headless: "new", args: launchArgs });
+
+  try {
+    const page = await browser.newPage();
+
+    if (proxyAuth) await page.authenticate(proxyAuth);
+
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+
+    // ── Step 1: Navigate ──
+    console.log("[AutoCheckout] Opening checkout:", checkoutUrl.substring(0, 80) + "...");
+    await page.goto(checkoutUrl, { waitUntil: "networkidle2", timeout: 45000 });
+    await delay(3000);
+
+    // ── Step 2: Click GoPay ──
+    console.log("[AutoCheckout] Selecting GoPay...");
+    const gopayClicked = await page.evaluate(() => {
+      // Strategy 1: Find by text content
+      const allEls = document.querySelectorAll("div, span, label, button, li");
+      for (const el of allEls) {
+        if (el.textContent?.trim() === "GoPay" || el.textContent?.trim() === "GoPay") {
+          const clickTarget = el.closest("[role='radio'], [role='option'], [data-testid], button, label") || el.parentElement;
+          if (clickTarget) { clickTarget.click(); return "text"; }
+        }
+      }
+      // Strategy 2: Find radio with gopay in attributes
+      const radios = document.querySelectorAll("[data-testid*='gopay' i], [data-testid*='GOPAY'], [value*='gopay' i]");
+      if (radios.length) { radios[0].click(); return "attr"; }
+      return null;
+    });
+    console.log(`[AutoCheckout] GoPay selection: ${gopayClicked || "NOT FOUND"}`);
+    await delay(2000);
+
+    // ── Step 3: Fill Name ──
+    console.log("[AutoCheckout] Filling name:", address.name);
+    await fillField(page, [
+      "#billingName",
+      "input[autocomplete='name']",
+      "input[placeholder*='Name' i]",
+      "input[name*='name' i]",
+    ], address.name);
+    await delay(500);
+
+    // ── Step 4: Select Country ──
+    console.log("[AutoCheckout] Selecting country:", address.country);
+    await handleDropdown(page, [
+      "#billingCountry",
+      "select[autocomplete='country']",
+      "select[name*='country' i]",
+    ], address.country);
+    await delay(1000);
+
+    // ── Step 5: Fill Address Line 1 ──
+    console.log("[AutoCheckout] Filling address line 1...");
+    await fillField(page, [
+      "#billingAddressLine1",
+      "input[autocomplete='address-line1']",
+      "input[placeholder*='Address line 1' i]",
+      "input[name*='addressLine1' i]",
+    ], address.addressLine1);
+    await delay(300);
+
+    // ── Step 6: Fill Address Line 2 (optional) ──
+    if (address.addressLine2) {
+      console.log("[AutoCheckout] Filling address line 2...");
+      await fillField(page, [
+        "#billingAddressLine2",
+        "input[autocomplete='address-line2']",
+        "input[placeholder*='Address line 2' i]",
+      ], address.addressLine2);
+      await delay(300);
+    }
+
+    // ── Step 7: Fill City ──
+    console.log("[AutoCheckout] Filling city:", address.city);
+    await fillField(page, [
+      "#billingLocality",
+      "input[autocomplete='address-level2']",
+      "input[placeholder*='City' i]",
+      "input[name*='city' i]",
+      "input[name*='locality' i]",
+    ], address.city);
+    await delay(300);
+
+    // ── Step 8: Fill ZIP ──
+    console.log("[AutoCheckout] Filling ZIP:", address.zip);
+    await fillField(page, [
+      "#billingPostal",
+      "input[autocomplete='postal-code']",
+      "input[placeholder*='ZIP' i]",
+      "input[name*='postal' i]",
+      "input[name*='zip' i]",
+    ], address.zip);
+    await delay(300);
+
+    // ── Step 9: Select State (if applicable) ──
+    if (address.state) {
+      console.log("[AutoCheckout] Selecting state:", address.state);
+      await handleDropdown(page, [
+        "#billingAdministrativeArea",
+        "select[autocomplete='address-level1']",
+        "select[name*='state' i]",
+        "select[name*='administrativeArea' i]",
+      ], address.state);
+      await delay(500);
+    }
+
+    // ── Step 10: Handle terms checkbox ──
+    console.log("[AutoCheckout] Checking terms checkbox...");
+    await page.evaluate(() => {
+      const checkboxes = document.querySelectorAll("input[type='checkbox']");
+      checkboxes.forEach(cb => { if (!cb.checked) cb.click(); });
+    });
+    await delay(500);
+
+    // ── Step 11: Click Subscribe ──
+    console.log("[AutoCheckout] Clicking Subscribe...");
+    const subClicked = await page.evaluate(() => {
+      // Strategy 1: button with text "Subscribe"
+      const buttons = document.querySelectorAll("button");
+      for (const btn of buttons) {
+        if (btn.textContent?.trim().toLowerCase().includes("subscribe")) {
+          btn.click();
+          return true;
+        }
+      }
+      // Strategy 2: submit button
+      const submit = document.querySelector("button[type='submit'], [data-testid*='submit']");
+      if (submit) { submit.click(); return true; }
+      return false;
+    });
+    console.log(`[AutoCheckout] Subscribe clicked: ${subClicked}`);
+
+    if (!subClicked) {
+      throw new Error("Could not find Subscribe button");
+    }
+
+    // ── Step 12: Wait for redirect to midtrans/gopay ──
+    console.log("[AutoCheckout] Waiting for GoPay redirect...");
+    let gopayUrl = null;
+
+    try {
+      // Wait for navigation to midtrans.com
+      await page.waitForFunction(
+        () => window.location.href.includes("midtrans.com") || window.location.href.includes("gopay"),
+        { timeout: 60000 }
+      );
+      gopayUrl = page.url();
+    } catch {
+      // Try waiting for any navigation
+      await delay(5000);
+      const currentUrl = page.url();
+      if (currentUrl !== checkoutUrl && !currentUrl.includes("stripe.com")) {
+        gopayUrl = currentUrl;
+      }
+    }
+
+    console.log(`[AutoCheckout] Final URL: ${gopayUrl || "NO REDIRECT"}`);
+
+    return {
+      success: !!gopayUrl,
+      stripeUrl: checkoutUrl,
+      gopayUrl: gopayUrl,
+      addressUsed: address.label,
+      error: gopayUrl ? null : "No redirect detected — checkout may have failed",
+    };
+  } finally {
+    await browser.close();
+    console.log("[AutoCheckout] Browser closed.");
+  }
+}
+
+// ── Puppeteer helper: fill a field trying multiple selectors ──
+async function fillField(page, selectors, value) {
+  for (const sel of selectors) {
+    try {
+      const el = await page.$(sel);
+      if (el) {
+        await el.click({ clickCount: 3 });
+        await el.type(value, { delay: 25 });
+        return true;
+      }
+    } catch {}
+  }
+  // Fallback: find by placeholder via evaluate
+  const filled = await page.evaluate((val) => {
+    const inputs = document.querySelectorAll("input[type='text'], input:not([type])");
+    for (const inp of inputs) {
+      if (!inp.value && inp.offsetParent !== null) {
+        inp.focus();
+        inp.value = val;
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+        inp.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      }
+    }
+    return false;
+  }, value);
+  return filled;
+}
+
+// ── Puppeteer helper: handle dropdown (select or custom) ──
+async function handleDropdown(page, selectors, value) {
+  for (const sel of selectors) {
+    try {
+      const el = await page.$(sel);
+      if (!el) continue;
+
+      const tagName = await page.evaluate(e => e.tagName.toLowerCase(), el);
+
+      if (tagName === "select") {
+        // Native select — try by value, visible text, or partial match
+        const selected = await page.evaluate((selector, val) => {
+          const select = document.querySelector(selector);
+          if (!select) return false;
+          const options = Array.from(select.options);
+          // Try exact match on text
+          let opt = options.find(o => o.text.trim().toLowerCase() === val.toLowerCase());
+          // Try partial match
+          if (!opt) opt = options.find(o => o.text.trim().toLowerCase().includes(val.toLowerCase()));
+          // Try value match
+          if (!opt) opt = options.find(o => o.value.toLowerCase() === val.toLowerCase());
+          if (opt) {
+            select.value = opt.value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+          }
+          return false;
+        }, sel, value);
+        if (selected) return true;
+      } else {
+        // Custom dropdown — click to open, then find option
+        await el.click();
+        await delay(800);
+        const clicked = await page.evaluate((val) => {
+          const items = document.querySelectorAll("[role='option'], [role='listbox'] > *, li, [data-testid*='option']");
+          for (const item of items) {
+            if (item.textContent?.trim().toLowerCase().includes(val.toLowerCase())) {
+              item.click();
+              return true;
+            }
+          }
+          return false;
+        }, value);
+        if (clicked) return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Auto-checkout endpoint ────────────────────────────────────────────────
+app.post("/api/auto-checkout", requireAuth, async (req, res) => {
+  const { checkoutUrl } = req.body;
+  if (!checkoutUrl) return res.status(400).json({ error: "checkoutUrl required" });
+
+  const cfg = loadConfig();
+  const addresses = cfg.addresses || [];
+  if (addresses.length === 0) return res.status(400).json({ error: "No addresses configured. Add addresses in Admin Panel." });
+
+  // Auto-rotate address
+  const address = addresses[addressRotationIndex % addresses.length];
+  addressRotationIndex++;
+
+  const proxy = cfg.checkoutProxy || null;
+
+  console.log(`\n${"═".repeat(60)}`);
+  console.log(`[AutoCheckout] Starting — Address: "${address.label}" | Proxy: ${proxy ? "yes" : "none"}`);
+  console.log(`${"═".repeat(60)}`);
+
+  try {
+    const result = await runAutoCheckout(checkoutUrl, address, proxy);
+    return res.json(result);
+  } catch (err) {
+    console.error("[AutoCheckout] ERROR:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });

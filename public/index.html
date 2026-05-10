@@ -94,8 +94,10 @@
         <span class="admin-title">⚙️ Admin Panel</span>
         <button class="toast-close" onclick="toggleAdmin()">&times;</button>
       </div>
+
+      <!-- Global Proxy -->
       <div class="admin-row">
-        <label class="config-label">Global Proxy</label>
+        <label class="config-label">Global Proxy <span class="label-hint">(for ChatGPT API)</span></label>
         <div class="link-row">
           <input type="text" class="proxy-input" id="adminProxy" placeholder="http://user:pass@host:port" spellcheck="false" />
           <button class="btn-copy" id="btnSaveProxy" onclick="saveProxy()" style="background:var(--red-dim);color:var(--red)">
@@ -104,6 +106,20 @@
         </div>
         <div class="admin-status" id="proxyStatus"></div>
       </div>
+
+      <!-- Checkout Proxy -->
+      <div class="admin-row">
+        <label class="config-label">Checkout Proxy <span class="label-hint">(for Stripe — rotating IP)</span></label>
+        <div class="link-row">
+          <input type="text" class="proxy-input" id="adminCheckoutProxy" placeholder="http://user:pass@host:port" spellcheck="false" />
+          <button class="btn-copy" onclick="saveCheckoutProxy()" style="background:var(--red-dim);color:var(--red)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </div>
+        <div class="admin-status" id="checkoutProxyStatus"></div>
+      </div>
+
+      <!-- Change Passwords -->
       <div class="admin-row">
         <label class="config-label">Change Passwords</label>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -112,6 +128,43 @@
           <button class="btn-copy" onclick="savePasswords()" style="background:var(--red-dim);color:var(--red)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
+        </div>
+      </div>
+
+      <!-- ═══ Address Management ═══ -->
+      <div class="admin-row" style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border)">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+          <label class="config-label" style="margin-bottom:0">📍 Billing Addresses <span class="label-hint">(auto-rotate)</span></label>
+          <button class="btn-session-link" onclick="toggleAddressForm()" id="btnToggleAddrForm" style="padding:5px 10px;font-size:0.68rem">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            Add
+          </button>
+        </div>
+
+        <!-- Address List -->
+        <div id="addressList" class="address-list"></div>
+
+        <!-- Add/Edit Address Form (hidden by default) -->
+        <div class="address-form hidden" id="addressForm">
+          <div class="address-form-grid">
+            <input type="text" class="proxy-input" id="addrLabel" placeholder="Label (e.g. US Address 1)" />
+            <input type="text" class="proxy-input" id="addrName" placeholder="Full Name *" />
+            <input type="text" class="proxy-input" id="addrCountry" placeholder="Country (e.g. United States) *" />
+            <input type="text" class="proxy-input" id="addrLine1" placeholder="Address Line 1 *" />
+            <input type="text" class="proxy-input" id="addrLine2" placeholder="Address Line 2" />
+            <div style="display:flex;gap:6px">
+              <input type="text" class="proxy-input" id="addrCity" placeholder="City *" style="flex:1" />
+              <input type="text" class="proxy-input" id="addrZip" placeholder="ZIP *" style="width:100px" />
+            </div>
+            <input type="text" class="proxy-input" id="addrState" placeholder="State (if applicable)" />
+          </div>
+          <div style="display:flex;gap:6px;margin-top:8px">
+            <button class="btn btn-primary" onclick="saveAddress()" id="btnSaveAddr" style="flex:1;padding:10px">
+              Save Address
+            </button>
+            <button class="btn-session-link" onclick="cancelAddressForm()" style="padding:10px 14px">Cancel</button>
+          </div>
+          <input type="hidden" id="addrEditIndex" value="-1" />
         </div>
       </div>
     </div>
@@ -174,13 +227,32 @@
         <button class="error-dismiss" id="btnDismiss">&times;</button>
       </div>
 
-      <!-- Result -->
+      <!-- Result: Stripe Link -->
       <div class="result-section hidden" id="resultSection">
         <div class="result-label" id="resultLabel">Payment Link</div>
         <div class="result-meta" id="resultMeta"></div>
         <div class="link-row">
           <input type="text" class="link-input" id="resultLink" readonly />
           <button class="btn-copy" id="btnCopy">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          </button>
+        </div>
+
+        <!-- Auto-Checkout Button -->
+        <button class="btn btn-gopay" id="btnAutoCheckout" onclick="doAutoCheckout()">
+          <div class="btn-shimmer"></div>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          ⚡ Auto Checkout → Get GoPay Link
+        </button>
+      </div>
+
+      <!-- Result: GoPay Link -->
+      <div class="result-section gopay-result hidden" id="gopayResultSection">
+        <div class="result-label gopay-label">🎯 GoPay Payment Link</div>
+        <div class="gopay-meta" id="gopayMeta"></div>
+        <div class="link-row">
+          <input type="text" class="link-input gopay-link-input" id="gopayLink" readonly />
+          <button class="btn-copy" id="btnCopyGopay" onclick="copyGopay()">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           </button>
         </div>
@@ -205,7 +277,7 @@
   <!-- Loader -->
   <div class="loader-overlay hidden" id="loader">
     <div class="loader-ring"></div>
-    <span class="loader-text">Generating payment link...</span>
+    <span class="loader-text" id="loaderText">Generating payment link...</span>
   </div>
 
   <script src="script.js"></script>

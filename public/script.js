@@ -11,6 +11,7 @@
     offerCountry: "JP",
     billingCountry: "ID",
     mode: "hosted",
+    lastCheckoutUrl: null,
   };
 
   const $ = id => document.getElementById(id);
@@ -140,23 +141,41 @@
       const res = await fetch("/api/admin/config");
       const data = await res.json();
       $("adminProxy").value = data.globalProxy || "";
+      $("adminCheckoutProxy").value = data.checkoutProxy || "";
+      // Load addresses
+      await loadAddresses();
     } catch (e) {}
   }
 
   window.saveProxy = async function () {
     const proxy = $("adminProxy").value.trim();
     try {
-      const res = await fetch("/api/admin/proxy", {
+      await fetch("/api/admin/proxy", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ proxy }),
       });
-      const data = await res.json();
       $("proxyStatus").textContent = proxy ? "✅ Proxy saved" : "✅ Proxy cleared";
       $("proxyStatus").style.color = "var(--green)";
       setTimeout(() => { $("proxyStatus").textContent = ""; }, 3000);
     } catch (e) {
       $("proxyStatus").textContent = "❌ Error saving";
       $("proxyStatus").style.color = "var(--error)";
+    }
+  };
+
+  window.saveCheckoutProxy = async function () {
+    const proxy = $("adminCheckoutProxy").value.trim();
+    try {
+      await fetch("/api/admin/checkout-proxy", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proxy }),
+      });
+      $("checkoutProxyStatus").textContent = proxy ? "✅ Checkout proxy saved" : "✅ Checkout proxy cleared";
+      $("checkoutProxyStatus").style.color = "var(--green)";
+      setTimeout(() => { $("checkoutProxyStatus").textContent = ""; }, 3000);
+    } catch (e) {
+      $("checkoutProxyStatus").textContent = "❌ Error saving";
+      $("checkoutProxyStatus").style.color = "var(--error)";
     }
   };
 
@@ -173,6 +192,134 @@
       $("newUserPw").value = "";
       alert("✅ Passwords updated!");
     } catch (e) { alert("Error!"); }
+  };
+
+  // ══════════════════════════════════════════════════════════════
+  // ADDRESS MANAGEMENT
+  // ══════════════════════════════════════════════════════════════
+  async function loadAddresses() {
+    try {
+      const res = await fetch("/api/admin/addresses");
+      const data = await res.json();
+      renderAddresses(data.addresses || []);
+    } catch (e) {}
+  }
+
+  function renderAddresses(addresses) {
+    const list = $("addressList");
+    if (addresses.length === 0) {
+      list.innerHTML = '<div class="addr-empty">No addresses configured yet</div>';
+      return;
+    }
+    list.innerHTML = addresses.map((a, i) => `
+      <div class="addr-card">
+        <div class="addr-card-header">
+          <span class="addr-label">${a.label}</span>
+          <div class="addr-actions">
+            <button class="addr-btn addr-edit" onclick="editAddress(${i})" title="Edit">✏️</button>
+            <button class="addr-btn addr-del" onclick="deleteAddress(${i})" title="Delete">🗑️</button>
+          </div>
+        </div>
+        <div class="addr-detail">${a.name}</div>
+        <div class="addr-detail addr-sub">${a.addressLine1}${a.addressLine2 ? ', ' + a.addressLine2 : ''}</div>
+        <div class="addr-detail addr-sub">${a.city}, ${a.state ? a.state + ', ' : ''}${a.zip} — ${a.country}</div>
+      </div>
+    `).join("");
+  }
+
+  window.toggleAddressForm = function () {
+    const form = $("addressForm");
+    if (form.classList.contains("hidden")) {
+      clearAddressForm();
+      form.classList.remove("hidden");
+    } else {
+      form.classList.add("hidden");
+    }
+  };
+
+  window.cancelAddressForm = function () {
+    $("addressForm").classList.add("hidden");
+    clearAddressForm();
+  };
+
+  function clearAddressForm() {
+    $("addrLabel").value = "";
+    $("addrName").value = "";
+    $("addrCountry").value = "";
+    $("addrLine1").value = "";
+    $("addrLine2").value = "";
+    $("addrCity").value = "";
+    $("addrZip").value = "";
+    $("addrState").value = "";
+    $("addrEditIndex").value = "-1";
+    $("btnSaveAddr").textContent = "Save Address";
+  }
+
+  window.saveAddress = async function () {
+    const addr = {
+      label: $("addrLabel").value.trim(),
+      name: $("addrName").value.trim(),
+      country: $("addrCountry").value.trim(),
+      addressLine1: $("addrLine1").value.trim(),
+      addressLine2: $("addrLine2").value.trim(),
+      city: $("addrCity").value.trim(),
+      zip: $("addrZip").value.trim(),
+      state: $("addrState").value.trim(),
+    };
+    if (!addr.name || !addr.country || !addr.addressLine1 || !addr.city || !addr.zip) {
+      alert("Please fill required fields (Name, Country, Address, City, ZIP)");
+      return;
+    }
+
+    const editIdx = parseInt($("addrEditIndex").value, 10);
+    try {
+      if (editIdx >= 0) {
+        // Update
+        await fetch(`/api/admin/addresses/${editIdx}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(addr),
+        });
+      } else {
+        // Create
+        await fetch("/api/admin/addresses", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(addr),
+        });
+      }
+      $("addressForm").classList.add("hidden");
+      clearAddressForm();
+      await loadAddresses();
+    } catch (e) {
+      alert("Error saving address");
+    }
+  };
+
+  window.editAddress = async function (index) {
+    try {
+      const res = await fetch("/api/admin/addresses");
+      const data = await res.json();
+      const a = data.addresses[index];
+      if (!a) return;
+      $("addrLabel").value = a.label || "";
+      $("addrName").value = a.name || "";
+      $("addrCountry").value = a.country || "";
+      $("addrLine1").value = a.addressLine1 || "";
+      $("addrLine2").value = a.addressLine2 || "";
+      $("addrCity").value = a.city || "";
+      $("addrZip").value = a.zip || "";
+      $("addrState").value = a.state || "";
+      $("addrEditIndex").value = index;
+      $("btnSaveAddr").textContent = "Update Address";
+      $("addressForm").classList.remove("hidden");
+    } catch (e) {}
+  };
+
+  window.deleteAddress = async function (index) {
+    if (!confirm("Delete this address?")) return;
+    try {
+      await fetch(`/api/admin/addresses/${index}`, { method: "DELETE" });
+      await loadAddresses();
+    } catch (e) { alert("Error deleting"); }
   };
 
   // ══════════════════════════════════════════════════════════════
@@ -206,7 +353,9 @@
   $("btnClear").onclick = () => {
     $("sessionInput").value = "";
     state.accessToken = null;
+    state.lastCheckoutUrl = null;
     $("resultSection").classList.add("hidden");
+    $("gopayResultSection").classList.add("hidden");
     $("errorBar").classList.add("hidden");
     $("accountToast").classList.add("hidden");
     $("sessionInput").focus();
@@ -223,6 +372,7 @@
 
     $("errorBar").classList.add("hidden");
     $("resultSection").classList.add("hidden");
+    $("gopayResultSection").classList.add("hidden");
 
     let parseRes;
     try {
@@ -237,7 +387,7 @@
     state.accessToken = parseRes.info.accessToken;
     showAccountToast(parseRes.info);
 
-    $("loader").classList.remove("hidden");
+    showLoader("Generating payment link...");
     $("btnGenerate").disabled = true;
 
     const userProxy = $("proxyInput").value.trim() || null;
@@ -254,10 +404,12 @@
         }),
       });
       const data = await res.json();
-      $("loader").classList.add("hidden");
+      hideLoader();
       $("btnGenerate").disabled = false;
 
       if (!res.ok || !data.success) return showError(data.error || "Generation failed.");
+
+      state.lastCheckoutUrl = data.link;
 
       $("resultLabel").textContent = state.mode === "hosted" ? "Hosted Payment Link" : "Embedded Checkout Link";
       $("resultLink").value = data.link;
@@ -277,12 +429,61 @@
       });
 
       $("resultSection").classList.remove("hidden");
+      // Show auto-checkout button only for hosted mode
+      $("btnAutoCheckout").classList.toggle("hidden", state.mode !== "hosted");
     } catch (e) {
-      $("loader").classList.add("hidden");
+      hideLoader();
       $("btnGenerate").disabled = false;
       showError("Error: " + e.message);
     }
   }
+
+  // ══════════════════════════════════════════════════════════════
+  // AUTO-CHECKOUT
+  // ══════════════════════════════════════════════════════════════
+  window.doAutoCheckout = async function () {
+    const url = state.lastCheckoutUrl;
+    if (!url) return showError("No checkout URL. Generate a link first.");
+
+    showLoader("🚀 Opening Stripe checkout & filling form...");
+    $("btnAutoCheckout").disabled = true;
+    $("gopayResultSection").classList.add("hidden");
+
+    try {
+      const res = await fetch("/api/auto-checkout", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ checkoutUrl: url }),
+      });
+      const data = await res.json();
+      hideLoader();
+      $("btnAutoCheckout").disabled = false;
+
+      if (!res.ok || !data.success) {
+        return showError(data.error || "Auto-checkout failed.");
+      }
+
+      // Show GoPay result
+      const meta = $("gopayMeta");
+      meta.innerHTML = "";
+      [
+        { l: "Address", v: data.addressUsed || "—" },
+        { l: "Status", v: "✓ Success" },
+      ].forEach(({ l, v }) => {
+        const d = document.createElement("div");
+        d.className = "meta-chip";
+        d.innerHTML = `<span class="meta-chip-label">${l}</span><span class="meta-chip-value">${v}</span>`;
+        meta.appendChild(d);
+      });
+
+      $("gopayLink").value = data.gopayUrl || "No GoPay URL captured";
+      $("gopayResultSection").classList.remove("hidden");
+
+    } catch (e) {
+      hideLoader();
+      $("btnAutoCheckout").disabled = false;
+      showError("Auto-checkout error: " + e.message);
+    }
+  };
 
   // ── Copy ────────────────────────────────────────────────────
   $("btnCopy").onclick = async () => {
@@ -290,6 +491,19 @@
     if (!v) return;
     try { await navigator.clipboard.writeText(v); } catch { $("resultLink").select(); document.execCommand("copy"); }
     const btn = $("btnCopy");
+    btn.classList.add("copied");
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
+    setTimeout(() => {
+      btn.classList.remove("copied");
+      btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>`;
+    }, 2000);
+  };
+
+  window.copyGopay = async function () {
+    const v = $("gopayLink").value;
+    if (!v) return;
+    try { await navigator.clipboard.writeText(v); } catch { $("gopayLink").select(); document.execCommand("copy"); }
+    const btn = $("btnCopyGopay");
     btn.classList.add("copied");
     btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
     setTimeout(() => {
@@ -313,11 +527,20 @@
 
   $("toastClose").onclick = () => $("accountToast").classList.add("hidden");
 
+  // ── Loader ─────────────────────────────────────────────────
+  function showLoader(msg) {
+    $("loaderText").textContent = msg || "Loading...";
+    $("loader").classList.remove("hidden");
+  }
+  function hideLoader() {
+    $("loader").classList.add("hidden");
+  }
+
   // ── Error ───────────────────────────────────────────────────
   function showError(msg) {
     $("errorMessage").textContent = msg;
     $("errorBar").classList.remove("hidden");
-    $("loader").classList.add("hidden");
+    hideLoader();
     $("btnGenerate").disabled = false;
   }
 
