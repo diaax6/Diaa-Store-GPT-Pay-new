@@ -666,25 +666,55 @@ app.post("/api/gopay/submit-otp", requireAuth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-// WHATSAPP — OTP Listener endpoints
+// WHATSAPP — Multi-Client OTP Listener endpoints
 // ══════════════════════════════════════════════════════════════════════════
 
-// WhatsApp status
+// All clients status
 app.get("/api/whatsapp/status", requireAuth, (req, res) => {
   res.json(whatsapp.getStatus());
 });
 
-// WhatsApp QR code for scanning
+// Add a new WhatsApp client
+app.post("/api/whatsapp/add", requireAdmin, async (req, res) => {
+  const { id, phone } = req.body;
+  if (!id || !phone) return res.status(400).json({ error: "id and phone required" });
+  try {
+    await whatsapp.addClient(id, phone);
+    res.json({ success: true, message: `Client ${id} initializing...` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Request pairing code (no QR needed!)
+app.post("/api/whatsapp/pair", requireAdmin, async (req, res) => {
+  const { id, phone } = req.body;
+  if (!id || !phone) return res.status(400).json({ error: "id and phone required" });
+  const client = whatsapp.getClient(id);
+  if (!client) return res.status(404).json({ error: "Client not found — add it first" });
+  const code = await client.requestPairing(phone);
+  if (code) {
+    res.json({ success: true, pairingCode: code, message: `Enter ${code} on WhatsApp → Linked Devices` });
+  } else {
+    res.json({ success: false, error: "Could not get pairing code" });
+  }
+});
+
+// QR code for a specific client
 app.get("/api/whatsapp/qr", requireAuth, (req, res) => {
-  const qr = whatsapp.getQRImage();
-  if (!qr) return res.json({ ready: whatsapp.ready, qr: null, message: whatsapp.ready ? "Already connected" : "Waiting for QR..." });
+  const id = req.query.id || "wa_0";
+  const qr = whatsapp.getQRImage(id);
+  const status = whatsapp.getStatus();
+  if (!qr) return res.json({ ready: status.anyReady, qr: null, message: status.anyReady ? "Connected" : "Waiting..." });
   res.json({ ready: false, qr });
 });
 
-// Get latest OTP
+// Get latest OTP from any client
 app.get("/api/whatsapp/otp", requireAuth, (req, res) => {
-  const otp = whatsapp.getLatestOTP();
-  res.json({ otp });
+  const status = whatsapp.getStatus();
+  const allOtps = status.clients?.flatMap(c => c.otpStore || []) || [];
+  allOtps.sort((a, b) => b.timestamp - a.timestamp);
+  res.json({ otp: allOtps[0] || null });
 });
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -848,12 +878,27 @@ app.post("/api/full-checkout", requireAuth, async (req, res) => {
 // START SERVER + WhatsApp
 // ══════════════════════════════════════════════════════════════════════════
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n🚀 Diaa Store GPT Pay running at http://localhost:${PORT}\n`);
 
-  // Initialize WhatsApp in background
-  whatsapp.initialize().catch(err => {
-    console.error("[WhatsApp] Failed to start:", err.message);
-    console.log("[WhatsApp] Server will continue without WhatsApp.");
-  });
+  // Auto-initialize WhatsApp clients from gopay accounts
+  const cfg = loadConfig();
+  const accounts = cfg.gopayAccounts || [];
+
+  if (accounts.length > 0) {
+    console.log(`[WhatsApp] Auto-initializing ${accounts.length} client(s)...`);
+    for (let i = 0; i < accounts.length; i++) {
+      const id = `wa_${i}`;
+      whatsapp.addClient(id, accounts[i].phone).catch(err => {
+        console.error(`[WhatsApp] Client ${id} failed:`, err.message);
+      });
+      // Wait 5s between inits to avoid resource issues
+      if (i < accounts.length - 1) await new Promise(r => setTimeout(r, 5000));
+    }
+  } else {
+    // Legacy: init single client
+    whatsapp.initialize().catch(err => {
+      console.error("[WhatsApp] Failed to start:", err.message);
+    });
+  }
 });
