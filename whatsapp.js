@@ -1,152 +1,205 @@
 // ══════════════════════════════════════════════════════════════════════════
-// WhatsApp Multi-Client OTP Manager
-// Supports multiple WhatsApp accounts, each in its own session
+// WhatsApp Multi-Client using Baileys — Primary Device Support
+// No Puppeteer needed! Direct WhatsApp protocol
 // ══════════════════════════════════════════════════════════════════════════
 
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode = require("qrcode-terminal");
-const QRCode = require("qrcode");
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  makeCacheableSignalKeyStore,
+} = require("@whiskeysockets/baileys");
+const pino = require("pino");
 const EventEmitter = require("events");
+const path = require("path");
+const fs = require("fs");
+
+const logger = pino({ level: "silent" }); // Suppress baileys logs
+
+// ══════════════════════════════════════════════════════════════════════════
+// Single WhatsApp Client (Baileys)
+// ══════════════════════════════════════════════════════════════════════════
 
 class WhatsAppClient extends EventEmitter {
   constructor(id, phoneLabel) {
     super();
-    this.id = id;                // Unique ID (e.g. "wa_0", "wa_1")
-    this.phoneLabel = phoneLabel; // Display label (e.g. "895320598550")
-    this.client = null;
+    this.id = id;
+    this.phoneLabel = phoneLabel;
+    this.sock = null;
     this.ready = false;
     this.qrCode = null;
-    this.qrText = null;
     this.pairingCode = null;
     this.otpStore = [];
     this.OTP_EXPIRY = 5 * 60 * 1000;
+    this.authDir = path.join(process.cwd(), `baileys-auth-${id}`);
+    this.reconnectAttempts = 0;
+    this.maxReconnects = 5;
   }
 
-  async initialize() {
+  async initialize(usePairingCode = false, pairingPhone = null) {
     console.log(`[WA:${this.id}] Initializing (${this.phoneLabel})...`);
 
-    this.client = new Client({
-      authStrategy: new LocalAuth({ dataPath: `./whatsapp-session-${this.id}` }),
-      puppeteer: {
-        headless: true,
-        args: [
-          "--no-sandbox", "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage", "--disable-gpu",
-          "--single-process",
-        ],
+    // Ensure auth directory exists
+    if (!fs.existsSync(this.authDir)) fs.mkdirSync(this.authDir, { recursive: true });
+
+    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+
+    this.sock = makeWASocket({
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
+      printQRInTerminal: !usePairingCode,
+      logger,
+      browser: ["Diaa-GPT-Pay", "Chrome", "1.0.0"],
+      generateHighQualityLinkPreview: false,
     });
 
-    this.client.on("qr", async (qr) => {
-      console.log(`[WA:${this.id}] QR Code — scan or use pairing code:`);
-      qrcode.generate(qr, { small: true });
-      this.qrText = qr;
-      try { this.qrCode = await QRCode.toDataURL(qr); } catch {}
-      this.emit("qr", qr);
-    });
-
-    this.client.on("ready", () => {
-      console.log(`[WA:${this.id}] ✅ Connected! (${this.phoneLabel})`);
-      this.ready = true;
-      this.qrCode = null;
-      this.qrText = null;
-      this.pairingCode = null;
-      this.emit("ready");
-    });
-
-    this.client.on("authenticated", () => {
-      console.log(`[WA:${this.id}] ✅ Authenticated`);
-    });
-
-    this.client.on("auth_failure", (msg) => {
-      console.error(`[WA:${this.id}] ❌ Auth failure:`, msg);
-      this.ready = false;
-    });
-
-    this.client.on("disconnected", (reason) => {
-      console.log(`[WA:${this.id}] Disconnected:`, reason);
-      this.ready = false;
-    });
-
-    // Message listener — ALL events
-    const handleMessage = async (message) => {
-      const text = message.body || "";
-      const from = message.from || "";
-      const isFromMe = message.fromMe || false;
-      if (isFromMe || !text) return;
-
-      console.log(`[WA:${this.id}] 📩 ${from}: ${text.substring(0, 80)}`);
-
-      const otpMatch = text.match(/\b(\d{4,6})\b/);
-      if (otpMatch) {
-        const otp = {
-          code: otpMatch[1], from,
-          body: text.substring(0, 200),
-          timestamp: Date.now(),
-          clientId: this.id,
-        };
-        console.log(`[WA:${this.id}] 🔑 OTP: ${otp.code}`);
-        this.otpStore.unshift(otp);
-        if (this.otpStore.length > 20) this.otpStore.length = 20;
-        this.emit("otp", otp);
+    // Request pairing code instead of QR
+    if (usePairingCode && pairingPhone && !state.creds.registered) {
+      try {
+        // Wait for connection to be ready for pairing
+        await new Promise((r) => setTimeout(r, 3000));
+        const code = await this.sock.requestPairingCode(pairingPhone);
+        this.pairingCode = code;
+        console.log(`[WA:${this.id}] 🔗 Pairing code: ${code}`);
+        console.log(`[WA:${this.id}] Enter this on WhatsApp → Linked Devices → Link with phone number`);
+        this.emit("pairing_code", code);
+      } catch (err) {
+        console.error(`[WA:${this.id}] Pairing error:`, err.message);
       }
-    };
-
-    this.client.on("message", handleMessage);
-    this.client.on("message_create", handleMessage);
-
-    try {
-      await this.client.initialize();
-    } catch (err) {
-      console.error(`[WA:${this.id}] Init error:`, err.message);
     }
-  }
 
-  // Request pairing code (alternative to QR)
-  async requestPairing(phoneNumber) {
-    try {
-      // Format: international without + (e.g. "628953...")
-      const code = await this.client.requestPairingCode(phoneNumber);
-      this.pairingCode = code;
-      console.log(`[WA:${this.id}] 🔗 Pairing code: ${code}`);
-      return code;
-    } catch (err) {
-      console.error(`[WA:${this.id}] Pairing error:`, err.message);
-      return null;
-    }
-  }
+    // Save credentials on update
+    this.sock.ev.on("creds.update", saveCreds);
 
-  // Poll GoPay chat for OTP
-  async pollForOTP(startTime) {
-    if (!this.client || !this.ready) return null;
-    try {
-      const chats = await this.client.getChats();
-      const gopayChat = chats.find(c => {
-        const name = (c.name || "").toLowerCase();
-        return name.includes("gopay") || name.includes("go-pay");
-      });
-      if (!gopayChat) return null;
+    // Connection updates
+    this.sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-      const messages = await gopayChat.fetchMessages({ limit: 3 });
-      for (const msg of messages) {
-        if (msg.timestamp * 1000 >= startTime) {
-          const otpMatch = (msg.body || "").match(/\b(\d{4,6})\b/);
-          if (otpMatch) return otpMatch[1];
+      if (qr) {
+        this.qrCode = qr;
+        console.log(`[WA:${this.id}] QR Code available`);
+        this.emit("qr", qr);
+      }
+
+      if (connection === "open") {
+        this.ready = true;
+        this.qrCode = null;
+        this.pairingCode = null;
+        this.reconnectAttempts = 0;
+        console.log(`[WA:${this.id}] ✅ Connected! (${this.phoneLabel})`);
+        this.emit("ready");
+      }
+
+      if (connection === "close") {
+        this.ready = false;
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+        console.log(
+          `[WA:${this.id}] Disconnected (code: ${statusCode})`,
+          shouldReconnect ? "— reconnecting..." : "— logged out"
+        );
+
+        if (shouldReconnect && this.reconnectAttempts < this.maxReconnects) {
+          this.reconnectAttempts++;
+          setTimeout(() => this.initialize(false), 3000);
         }
       }
-    } catch {}
-    return null;
+    });
+
+    // ── MESSAGE LISTENER — catches ALL messages including business ──
+    this.sock.ev.on("messages.upsert", ({ messages, type }) => {
+      for (const msg of messages) {
+        if (!msg.message || msg.key.fromMe) continue;
+
+        // Extract text from any message type
+        const text = this._extractText(msg);
+        const from = msg.key.remoteJid || "";
+
+        if (text) {
+          console.log(`[WA:${this.id}] 📩 ${from}: ${text.substring(0, 80)}`);
+
+          // Check for OTP (4-6 digits)
+          const otpMatch = text.match(/\b(\d{4,6})\b/);
+          if (otpMatch) {
+            const otp = {
+              code: otpMatch[1],
+              from,
+              body: text.substring(0, 200),
+              timestamp: Date.now(),
+              clientId: this.id,
+            };
+            console.log(`[WA:${this.id}] 🔑 OTP: ${otp.code}`);
+            this.otpStore.unshift(otp);
+            if (this.otpStore.length > 20) this.otpStore.length = 20;
+            this.emit("otp", otp);
+          }
+        }
+      }
+    });
   }
 
-  // Wait for OTP — hybrid: events + polling
+  // Extract text from ANY message type (regular, template, button, etc.)
+  _extractText(msg) {
+    const m = msg.message;
+    if (!m) return "";
+
+    // Regular text
+    if (m.conversation) return m.conversation;
+    if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
+
+    // Template messages (business accounts like GoPay)
+    if (m.templateMessage?.hydratedTemplate?.hydratedContentText) {
+      return m.templateMessage.hydratedTemplate.hydratedContentText;
+    }
+    if (m.templateMessage?.hydratedFourRowTemplate?.hydratedContentText) {
+      return m.templateMessage.hydratedFourRowTemplate.hydratedContentText;
+    }
+
+    // Button messages
+    if (m.buttonsResponseMessage?.selectedDisplayText) {
+      return m.buttonsResponseMessage.selectedDisplayText;
+    }
+    if (m.templateButtonReplyMessage?.selectedDisplayText) {
+      return m.templateButtonReplyMessage.selectedDisplayText;
+    }
+
+    // High structured message (newer templates)
+    if (m.highlyStructuredMessage?.hydratedHsm?.hydratedTemplate?.hydratedContentText) {
+      return m.highlyStructuredMessage.hydratedHsm.hydratedTemplate.hydratedContentText;
+    }
+
+    // Interactive messages
+    if (m.interactiveMessage?.body?.text) return m.interactiveMessage.body.text;
+
+    // Document / media with caption
+    if (m.imageMessage?.caption) return m.imageMessage.caption;
+    if (m.videoMessage?.caption) return m.videoMessage.caption;
+    if (m.documentMessage?.caption) return m.documentMessage.caption;
+
+    // List messages
+    if (m.listMessage?.description) return m.listMessage.description;
+
+    // Fallback: try to stringify and find OTP pattern
+    try {
+      const raw = JSON.stringify(m);
+      const otpInRaw = raw.match(/(\d{4,6}) is your verification/i);
+      if (otpInRaw) return otpInRaw[0];
+    } catch {}
+
+    return "";
+  }
+
+  // Wait for OTP with timeout
   async waitForOTP(timeoutMs = 60000) {
-    const startTime = Date.now();
     return new Promise((resolve, reject) => {
       let resolved = false;
+
       const cleanup = () => {
         resolved = true;
         clearTimeout(timeout);
-        clearInterval(poll);
         this.removeListener("otp", handler);
       };
 
@@ -158,17 +211,6 @@ class WhatsAppClient extends EventEmitter {
         if (!resolved) { cleanup(); resolve(otp); }
       };
       this.once("otp", handler);
-
-      const poll = setInterval(async () => {
-        if (resolved) return;
-        const code = await this.pollForOTP(startTime);
-        if (code && !resolved) {
-          const otp = { code, from: "gopay-poll", timestamp: Date.now(), clientId: this.id };
-          console.log(`[WA:${this.id}] 🔑 OTP via polling: ${code}`);
-          cleanup();
-          resolve(otp);
-        }
-      }, 5000);
     });
   }
 
@@ -178,10 +220,17 @@ class WhatsAppClient extends EventEmitter {
       phone: this.phoneLabel,
       ready: this.ready,
       hasQR: !!this.qrCode,
-      hasPairingCode: !!this.pairingCode,
       pairingCode: this.pairingCode,
       otpCount: this.otpStore.length,
+      latestOTP: this.otpStore[0] || null,
     };
+  }
+
+  async logout() {
+    try {
+      if (this.sock) await this.sock.logout();
+      this.ready = false;
+    } catch {}
   }
 }
 
@@ -192,32 +241,30 @@ class WhatsAppClient extends EventEmitter {
 class WhatsAppManager extends EventEmitter {
   constructor() {
     super();
-    this.clients = new Map(); // id → WhatsAppClient
+    this.clients = new Map();
   }
 
-  // Add and initialize a new client
-  async addClient(id, phoneLabel) {
+  async addClient(id, phoneLabel, usePairingCode = false, pairingPhone = null) {
     if (this.clients.has(id)) {
-      console.log(`[WAManager] Client ${id} already exists`);
-      return this.clients.get(id);
+      const existing = this.clients.get(id);
+      if (existing.ready) {
+        console.log(`[WAManager] Client ${id} already connected`);
+        return existing;
+      }
     }
 
     const client = new WhatsAppClient(id, phoneLabel);
-
-    // Forward OTP events
     client.on("otp", (otp) => this.emit("otp", otp));
-
     this.clients.set(id, client);
-    await client.initialize();
+
+    await client.initialize(usePairingCode, pairingPhone);
     return client;
   }
 
-  // Get client by ID
   getClient(id) {
     return this.clients.get(id);
   }
 
-  // Get any ready client (fallback)
   getAnyReadyClient() {
     for (const [, client] of this.clients) {
       if (client.ready) return client;
@@ -225,38 +272,26 @@ class WhatsAppManager extends EventEmitter {
     return null;
   }
 
-  // Wait for OTP on a specific client
   async waitForOTP(clientId, timeoutMs = 60000) {
     const client = this.clients.get(clientId);
-    if (client && client.ready) {
-      return client.waitForOTP(timeoutMs);
-    }
-    // Fallback: listen on ALL clients
+    if (client?.ready) return client.waitForOTP(timeoutMs);
     return this.waitForOTPAny(timeoutMs);
   }
 
-  // Wait for OTP on ANY client
   async waitForOTPAny(timeoutMs = 60000) {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.removeListener("otp", handler);
         reject(new Error("OTP timeout"));
       }, timeoutMs);
-
-      const handler = (otp) => {
-        clearTimeout(timeout);
-        resolve(otp);
-      };
+      const handler = (otp) => { clearTimeout(timeout); resolve(otp); };
       this.once("otp", handler);
     });
   }
 
-  // Get status of all clients
   getStatus() {
     const statuses = [];
-    for (const [, client] of this.clients) {
-      statuses.push(client.getStatus());
-    }
+    for (const [, client] of this.clients) statuses.push(client.getStatus());
     return {
       clientCount: this.clients.size,
       clients: statuses,
@@ -264,34 +299,25 @@ class WhatsAppManager extends EventEmitter {
     };
   }
 
-  // Get QR image for a specific client
   getQRImage(clientId) {
-    const client = this.clients.get(clientId);
-    return client?.qrCode || null;
+    return this.clients.get(clientId)?.qrCode || null;
   }
 }
 
-// Singleton
+// ── Singleton + backward compatibility ──────────────────────────────────
+
 const manager = new WhatsAppManager();
 
-// Backward compatibility — expose same interface
 module.exports = {
   manager,
-  // Legacy single-client interface
   initialize: () => manager.addClient("wa_0", "primary"),
   waitForOTP: (timeout) => manager.waitForOTPAny(timeout),
   getStatus: () => {
     const s = manager.getStatus();
-    const primary = manager.getClient("wa_0");
-    return {
-      ready: s.anyReady,
-      hasQR: primary?.qrCode ? true : false,
-      otpCount: primary?.otpStore?.length || 0,
-      latestOTP: primary?.otpStore?.[0] || null,
-      ...s,
-    };
+    return { ready: s.anyReady, ...s };
   },
-  getQRImage: () => manager.getQRImage("wa_0"),
+  getQRImage: (id) => manager.getQRImage(id || "wa_0"),
   getClient: (id) => manager.getClient(id),
-  addClient: (id, phone) => manager.addClient(id, phone),
+  addClient: (id, phone, usePairing, pairingPhone) =>
+    manager.addClient(id, phone, usePairing, pairingPhone),
 };

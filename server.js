@@ -679,24 +679,22 @@ app.post("/api/whatsapp/add", requireAdmin, async (req, res) => {
   const { id, phone } = req.body;
   if (!id || !phone) return res.status(400).json({ error: "id and phone required" });
   try {
-    await whatsapp.addClient(id, phone);
-    res.json({ success: true, message: `Client ${id} initializing...` });
+    // Add client with pairing code — one step!
+    const client = await whatsapp.addClient(id, phone, true, phone);
+
+    // Wait a moment for pairing code to be generated
+    await new Promise(r => setTimeout(r, 5000));
+
+    const status = client.getStatus();
+    res.json({
+      success: true,
+      pairingCode: status.pairingCode,
+      message: status.pairingCode
+        ? `Enter ${status.pairingCode} on WhatsApp → Linked Devices → Link with phone number`
+        : `Client ${id} initializing... check /api/whatsapp/status`,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-// Request pairing code (no QR needed!)
-app.post("/api/whatsapp/pair", requireAdmin, async (req, res) => {
-  const { id, phone } = req.body;
-  if (!id || !phone) return res.status(400).json({ error: "id and phone required" });
-  const client = whatsapp.getClient(id);
-  if (!client) return res.status(404).json({ error: "Client not found — add it first" });
-  const code = await client.requestPairing(phone);
-  if (code) {
-    res.json({ success: true, pairingCode: code, message: `Enter ${code} on WhatsApp → Linked Devices` });
-  } else {
-    res.json({ success: false, error: "Could not get pairing code" });
   }
 });
 
