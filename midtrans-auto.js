@@ -107,8 +107,21 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
       await delay(500);
       await page.screenshot({ path: path.join(debugDir, "mt_02_phone.png"), fullPage: true });
 
-      // Click submit/continue button
-      await clickButton(page, ["Lanjut", "Continue", "Submit", "Konfirmasi", "Verify", "Kirim"]);
+      // Click submit/continue button — try many labels
+      const clicked = await clickButton(page, [
+        "Lanjutkan", "Lanjut", "Continue", "Next", "Submit",
+        "Konfirmasi", "Verify", "Kirim", "Link", "Hubungkan",
+        "Sambungkan", "Connect", "Proceed", "OK",
+      ]);
+
+      // If no button found, try pressing Enter
+      if (!clicked) {
+        console.log("[Midtrans] No button found — trying Enter key...");
+        await dumpButtons(page);
+        await page.keyboard.press("Enter");
+        console.log("[Midtrans] Pressed Enter");
+      }
+
       await delay(3000);
       await page.screenshot({ path: path.join(debugDir, "mt_03_after_phone.png"), fullPage: true });
     } else {
@@ -286,6 +299,18 @@ async function dumpInputs(page) {
     }));
   });
   console.log("[Midtrans] Inputs:", JSON.stringify(inputs, null, 2));
+}
+
+async function dumpButtons(page) {
+  const buttons = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("button, a, [role='button'], input[type='submit'], div[onclick]")).map(el => ({
+      tag: el.tagName, text: el.textContent?.trim()?.substring(0, 50),
+      id: el.id, class: el.className?.substring?.(0, 50),
+      visible: el.offsetParent !== null,
+      href: el.href || null,
+    }));
+  });
+  console.log("[Midtrans] Buttons:", JSON.stringify(buttons.filter(b => b.visible), null, 2));
 }
 
 function saveCapture(apis) {
