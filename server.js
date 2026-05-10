@@ -360,287 +360,135 @@ app.post("/api/generate-link", requireAuth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
-// AUTO-CHECKOUT — Puppeteer automation on Stripe hosted checkout
+// AUTO-CHECKOUT — Direct API (no browser needed!)
 // ══════════════════════════════════════════════════════════════════════════
 
 async function runAutoCheckout(checkoutUrl, address) {
-  const puppeteer = require("puppeteer");
-  const debugDir = path.join(__dirname, "public", "debug");
-  if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+  console.log("[DirectAPI] Starting...");
 
-  console.log("[AutoCheckout] Launching browser...");
-  const browser = await puppeteer.launch({
-    headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+  // Extract session ID from URL
+  const csMatch = checkoutUrl.match(/cs_live_[a-zA-Z0-9_]+/);
+  if (!csMatch) throw new Error("No checkout session ID in URL");
+  const sessionId = csMatch[0];
+  console.log("[DirectAPI] Session:", sessionId);
+
+  // Step 1: Fetch checkout page to get publishable key + config
+  console.log("[DirectAPI] Fetching checkout page...");
+  const pageRes = await fetch(checkoutUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    redirect: "follow",
   });
+  const html = await pageRes.text();
 
-  try {
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-
-    console.log("[AutoCheckout] Loading page...");
-    await page.goto(checkoutUrl, { waitUntil: "networkidle2", timeout: 45000 });
-    await delay(3000);
-    await page.screenshot({ path: path.join(debugDir, "01_loaded.png"), fullPage: true });
-
-    // Click GoPay radio — must use REAL Puppeteer click (not evaluate)
-    console.log("[AutoCheckout] Clicking GoPay...");
-    let gopayClicked = false;
-    try {
-      // Find GoPay text element and get its bounding box for real click
-      const gopayPos = await page.evaluate(() => {
-        for (const el of document.querySelectorAll("div, span, label, li")) {
-          if (el.textContent?.trim() === "GoPay" && el.children.length <= 2) {
-            const rect = el.getBoundingClientRect();
-            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-          }
-        }
-        return null;
-      });
-      if (gopayPos) {
-        await page.mouse.click(gopayPos.x, gopayPos.y);
-        gopayClicked = true;
-      }
-    } catch (e) { console.log("[AutoCheckout] GoPay click error:", e.message); }
-    console.log("[AutoCheckout] GoPay:", gopayClicked ? "CLICKED" : "NOT FOUND");
-    await delay(3000);
-    await page.screenshot({ path: path.join(debugDir, "02_gopay.png"), fullPage: true });
-
-    // Wait for Name field to appear (it only shows after GoPay is selected)
-    console.log("[AutoCheckout] Waiting for billing form...");
-    try {
-      await page.waitForSelector("#billingName, input[autocomplete='name']", { timeout: 8000 });
-      console.log("[AutoCheckout] Billing form appeared!");
-    } catch {
-      console.log("[AutoCheckout] Billing form not found — trying GoPay click again...");
-      // Try clicking the radio button directly
-      try {
-        const radioPos = await page.evaluate(() => {
-          const radios = document.querySelectorAll("[role='radio'], input[type='radio']");
-          for (const r of radios) {
-            const parent = r.closest("div, label, li");
-            if (parent && parent.textContent?.includes("GoPay")) {
-              const rect = r.getBoundingClientRect();
-              return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-            }
-          }
-          // Try second payment option (GoPay is usually the 2nd)
-          if (radios.length >= 2) {
-            const rect = radios[1].getBoundingClientRect();
-            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-          }
-          return null;
-        });
-        if (radioPos) {
-          await page.mouse.click(radioPos.x, radioPos.y);
-          await delay(3000);
-        }
-      } catch {}
-      await page.screenshot({ path: path.join(debugDir, "02b_gopay_retry.png"), fullPage: true });
-    }
-
-    // Fill form using REAL keyboard input (page.type) — not evaluate setVal
-    // React/Stripe ignores native setters, only responds to real key events
-    console.log("[AutoCheckout] Filling name & country with real typing...");
-
-    // Helper: clear field and type
-    async function clearAndType(selector, value) {
-      try {
-        await page.waitForSelector(selector, { timeout: 5000 });
-        await page.click(selector, { clickCount: 3 });
-        await page.keyboard.press('Backspace');
-        await page.type(selector, value, { delay: 20 });
-        return true;
-      } catch { return false; }
-    }
-
-    // Name
-    const nameOk = await clearAndType("#billingName", address.name)
-      || await clearAndType("input[autocomplete='name']", address.name);
-    console.log("[AutoCheckout] Name:", nameOk ? "OK" : "MISS");
-
-    // Country (select)
-    let countryOk = false;
-    for (const sel of ["#billingCountry", "select[autocomplete='country']"]) {
-      try {
-        await page.waitForSelector(sel, { timeout: 3000 });
-        await page.select(sel, address.country);
-        countryOk = true;
-        break;
-      } catch {}
-    }
-    console.log("[AutoCheckout] Country:", countryOk ? "OK" : "MISS");
-    await delay(1500);
-
-    // Click "Enter address manually"
-    const manualOk = await page.evaluate(() => {
-      for (const l of document.querySelectorAll("a, button, span")) {
-        if (l.textContent?.trim().toLowerCase().includes("enter address manually")) { l.click(); return true; }
-      }
-      return false;
-    });
-    console.log("[AutoCheckout] Manual:", manualOk ? "OK" : "MISS");
-    await delay(2000);
-    await page.screenshot({ path: path.join(debugDir, "03_manual.png"), fullPage: true });
-
-    // Address fields
-    console.log("[AutoCheckout] Filling address with real typing...");
-    const a1Ok = await clearAndType("#billingAddressLine1", address.addressLine1)
-      || await clearAndType("input[autocomplete='address-line1']", address.addressLine1);
-    console.log("[AutoCheckout] Addr1:", a1Ok ? "OK" : "MISS");
-
-    if (address.addressLine2) {
-      await clearAndType("#billingAddressLine2", address.addressLine2)
-        || await clearAndType("input[autocomplete='address-line2']", address.addressLine2);
-    }
-
-    const cityOk = await clearAndType("#billingLocality", address.city)
-      || await clearAndType("input[autocomplete='address-level2']", address.city);
-    console.log("[AutoCheckout] City:", cityOk ? "OK" : "MISS");
-
-    const zipOk = await clearAndType("#billingPostal", address.zip)
-      || await clearAndType("input[autocomplete='postal-code']", address.zip)
-      || await clearAndType("input[placeholder*='ZIP' i]", address.zip)
-      || await clearAndType("input[placeholder*='Postal' i]", address.zip)
-      || await clearAndType("input[name*='postal' i]", address.zip)
-      || await clearAndType("input[name*='zip' i]", address.zip);
-    if (!zipOk) {
-      // Debug: dump all inputs to find the right selector
-      const inputs = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("input, select")).map(e => ({
-          tag: e.tagName, id: e.id, name: e.name, type: e.type,
-          placeholder: e.placeholder, autocomplete: e.autocomplete,
-          value: e.value?.substring(0, 30), visible: e.offsetParent !== null
-        }));
-      });
-      console.log("[AutoCheckout] ZIP MISS — All inputs:", JSON.stringify(inputs, null, 2));
-    }
-    console.log("[AutoCheckout] ZIP:", zipOk ? "OK" : "MISS");
-
-    // State (select)
-    if (address.state) {
-      for (const sel of ["#billingAdministrativeArea", "select[autocomplete='address-level1']"]) {
-        try {
-          await page.waitForSelector(sel, { timeout: 3000 });
-          await page.select(sel, address.state);
-          console.log("[AutoCheckout] State: OK");
-          break;
-        } catch {}
-      }
-    }
-    await delay(500);
-
-    // Checkbox — use real click
-    try {
-      const cbSel = "input[type='checkbox']";
-      const isChecked = await page.$eval(cbSel, el => el.checked);
-      if (!isChecked) {
-        await page.click(cbSel);
-        console.log("[AutoCheckout] Checkbox: clicked");
-      }
-    } catch {
-      // Try role=checkbox
-      try { await page.click("[role='checkbox']"); console.log("[AutoCheckout] Role checkbox: clicked"); } catch {}
-    }
-    await delay(1000);
-    await page.screenshot({ path: path.join(debugDir, "04_filled.png"), fullPage: true });
-
-    // ── INTERCEPT: Capture all API calls when form submits ──
-    console.log("[AutoCheckout] Setting up network interception...");
-    const capturedRequests = [];
-    const capturedResponses = [];
-
-    page.on('request', req => {
-      const url = req.url();
-      if (url.includes('stripe.com') && (req.method() === 'POST')) {
-        capturedRequests.push({
-          url: url,
-          method: req.method(),
-          headers: req.headers(),
-          postData: req.postData()?.substring(0, 2000)
-        });
-        console.log("[INTERCEPT] POST →", url.substring(0, 120));
-        console.log("[INTERCEPT] Body:", req.postData()?.substring(0, 500));
-      }
-    });
-
-    page.on('response', async res => {
-      const url = res.url();
-      if (url.includes('stripe.com') && capturedRequests.some(r => r.url === url)) {
-        try {
-          const body = await res.text();
-          capturedResponses.push({ url, status: res.status(), body: body.substring(0, 3000) });
-          console.log("[INTERCEPT] Response", res.status(), "from", url.substring(0, 120));
-          console.log("[INTERCEPT] Body:", body.substring(0, 1000));
-        } catch {}
-      }
-    });
-
-    // Also track URL changes
-    page.on('framenavigated', frame => {
-      if (frame === page.mainFrame()) {
-        console.log("[INTERCEPT] Navigation →", frame.url());
-      }
-    });
-
-    // Click Pay/Subscribe button
-    console.log("[AutoCheckout] Clicking Pay...");
-    const btn = await page.evaluate(() => {
-      for (const b of document.querySelectorAll("button")) {
-        const t = b.textContent?.trim().toLowerCase();
-        if (t && (t.includes("subscribe") || t.includes("pay"))) { b.scrollIntoView(); b.click(); return t; }
-      }
-      const sub = document.querySelector("button[type='submit']");
-      if (sub) { sub.click(); return "submit"; }
-      return null;
-    });
-    console.log("[AutoCheckout] Button:", btn || "NOT FOUND");
-    if (!btn) {
-      await page.screenshot({ path: path.join(debugDir, "05_no_btn.png"), fullPage: true });
-      throw new Error("No Pay/Subscribe button");
-    }
-
-    // Wait for redirect — check broader patterns
-    console.log("[AutoCheckout] Waiting for redirect (up to 90s)...");
-    let gopayUrl = null;
-    const startUrl = page.url();
-
-    try {
-      await page.waitForFunction(
-        (start) => window.location.href !== start && !window.location.href.includes('checkout.stripe.com'),
-        { timeout: 90000 },
-        startUrl
-      );
-      gopayUrl = page.url();
-      console.log("[AutoCheckout] Redirected to:", gopayUrl);
-    } catch {
-      console.log("[AutoCheckout] No navigation detected, checking URL...");
-      const cur = page.url();
-      if (cur !== startUrl) gopayUrl = cur;
-    }
-
-    await delay(3000);
-    await page.screenshot({ path: path.join(debugDir, "06_final.png"), fullPage: true });
-    console.log("[AutoCheckout] Final URL:", page.url());
-    console.log("[AutoCheckout] Captured", capturedRequests.length, "API requests,", capturedResponses.length, "responses");
-
-    // Save captured API data for building Direct API later
-    try {
-      fs.writeFileSync(path.join(debugDir, "api_capture.json"), JSON.stringify({ requests: capturedRequests, responses: capturedResponses }, null, 2));
-      console.log("[AutoCheckout] API capture saved to /debug/api_capture.json");
-    } catch {}
-
-    console.log("[AutoCheckout] Result:", gopayUrl || "NO REDIRECT");
-
-    return { success: !!gopayUrl, stripeUrl: checkoutUrl, gopayUrl, addressUsed: address.label, error: gopayUrl ? null : "No redirect" };
-  } finally {
-    await browser.close();
-    console.log("[AutoCheckout] Done.");
+  // Extract publishable key
+  const pkMatch = html.match(/pk_live_[a-zA-Z0-9]+/);
+  if (!pkMatch) {
+    console.log("[DirectAPI] Page HTML (first 2000):", html.substring(0, 2000));
+    throw new Error("No Stripe publishable key found in page");
   }
-}
+  const pk = pkMatch[0];
+  console.log("[DirectAPI] PK:", pk.substring(0, 25) + "...");
 
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+  // Try to extract expected amount/currency from page
+  let expectedAmount = "0";
+  let expectedCurrency = "idr";
+  const amountMatch = html.match(/"amount"\s*:\s*(\d+)/);
+  if (amountMatch) expectedAmount = amountMatch[1];
+  const currencyMatch = html.match(/"currency"\s*:\s*"([a-z]+)"/);
+  if (currencyMatch) expectedCurrency = currencyMatch[1];
+  console.log("[DirectAPI] Expected:", expectedAmount, expectedCurrency);
+
+  // Step 2: Confirm payment via Stripe API
+  const body = new URLSearchParams();
+  body.append("eid", "NA");
+  body.append("payment_method_data[type]", "gopay");
+  body.append("payment_method_data[billing_details][name]", address.name);
+  body.append("payment_method_data[billing_details][address][country]", address.country);
+  body.append("payment_method_data[billing_details][address][line1]", address.addressLine1);
+  if (address.addressLine2) body.append("payment_method_data[billing_details][address][line2]", address.addressLine2);
+  body.append("payment_method_data[billing_details][address][city]", address.city);
+  if (address.state) body.append("payment_method_data[billing_details][address][state]", address.state);
+  body.append("payment_method_data[billing_details][address][postal_code]", address.zip);
+  body.append("expected_amount", expectedAmount);
+  body.append("expected_currency", expectedCurrency);
+  body.append("tos_shown_and_accepted", "true");
+
+  const headers = {
+    "Authorization": `Bearer ${pk}`,
+    "Content-Type": "application/x-www-form-urlencoded",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Origin": "https://checkout.stripe.com",
+    "Referer": "https://checkout.stripe.com/",
+  };
+
+  // Try multiple possible endpoints
+  const endpoints = [
+    `https://api.stripe.com/v1/payment_pages/${sessionId}/confirm`,
+    `https://api.stripe.com/v1/checkout/sessions/${sessionId}/confirm`,
+  ];
+
+  let result = null;
+  let lastError = null;
+
+  for (const endpoint of endpoints) {
+    console.log("[DirectAPI] Trying:", endpoint);
+    try {
+      const confirmRes = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: body.toString(),
+      });
+
+      const data = await confirmRes.json();
+      console.log("[DirectAPI] Status:", confirmRes.status);
+      console.log("[DirectAPI] Response:", JSON.stringify(data).substring(0, 1000));
+
+      if (confirmRes.status === 200 || confirmRes.status === 303) {
+        result = data;
+        break;
+      }
+      lastError = data;
+    } catch (err) {
+      console.log("[DirectAPI] Error:", err.message);
+      lastError = { error: err.message };
+    }
+  }
+
+  if (!result && lastError) {
+    console.log("[DirectAPI] All endpoints failed. Last error:", JSON.stringify(lastError).substring(0, 500));
+    // Return the error details so we can debug
+    return {
+      success: false,
+      stripeUrl: checkoutUrl,
+      gopayUrl: null,
+      addressUsed: address.label,
+      error: "API confirm failed",
+      debug: JSON.stringify(lastError).substring(0, 500)
+    };
+  }
+
+  // Extract redirect URL from response
+  const gopayUrl = result?.redirect_to_url?.url
+    || result?.next_action?.redirect_to_url?.url
+    || result?.url
+    || result?.redirect_url
+    || result?.payment_intent?.next_action?.redirect_to_url?.url;
+
+  console.log("[DirectAPI] GoPay URL:", gopayUrl || "NOT FOUND");
+  console.log("[DirectAPI] Done! ✓");
+
+  return {
+    success: !!gopayUrl,
+    stripeUrl: checkoutUrl,
+    gopayUrl,
+    addressUsed: address.label,
+    error: gopayUrl ? null : "No redirect URL in response",
+    debug: gopayUrl ? null : JSON.stringify(result).substring(0, 500)
+  };
+}
 
 // ── Auto-checkout endpoint ────────────────────────────────────────────────
 app.post("/api/auto-checkout", requireAuth, async (req, res) => {
@@ -655,14 +503,14 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
   addressRotationIndex++;
 
   console.log(`\n${"═".repeat(60)}`);
-  console.log(`[AutoCheckout] Starting — Address: "${address.label}"`);
+  console.log(`[DirectAPI] Starting — Address: "${address.label}"`);
   console.log(`${"═".repeat(60)}`);
 
   try {
     const result = await runAutoCheckout(checkoutUrl, address);
     return res.json(result);
   } catch (err) {
-    console.error("[AutoCheckout] ERROR:", err.message);
+    console.error("[DirectAPI] ERROR:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -670,3 +518,4 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n🚀 Diaa Store GPT Pay running at http://localhost:${PORT}\n`);
 });
+
