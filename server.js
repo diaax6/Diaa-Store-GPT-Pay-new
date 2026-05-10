@@ -372,34 +372,27 @@ async function runAutoCheckout(checkoutUrl, address) {
   const sessionId = csMatch[0];
   console.log("[DirectAPI] Session:", sessionId);
 
-  // Step 1: Fetch checkout page to get publishable key + config
-  console.log("[DirectAPI] Fetching checkout page...");
-  const pageRes = await fetch(checkoutUrl, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-    redirect: "follow",
-  });
-  const html = await pageRes.text();
+  // OpenAI's Stripe publishable key (public, from checkout page telemetry)
+  const pk = "pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVAlqCxdxCUvoRh1XWwRacViovU3kLKvpkjh7IqkW00iXQsjo3n";
+  console.log("[DirectAPI] PK: pk_live_51HOrSwC6h1nx...");
 
-  // Extract publishable key
-  const pkMatch = html.match(/pk_live_[a-zA-Z0-9]+/);
-  if (!pkMatch) {
-    console.log("[DirectAPI] Page HTML (first 2000):", html.substring(0, 2000));
-    throw new Error("No Stripe publishable key found in page");
-  }
-  const pk = pkMatch[0];
-  console.log("[DirectAPI] PK:", pk.substring(0, 25) + "...");
-
-  // Try to extract expected amount/currency from page
+  // Fetch session info from Stripe to get expected amount/currency
   let expectedAmount = "0";
   let expectedCurrency = "idr";
-  const amountMatch = html.match(/"amount"\s*:\s*(\d+)/);
-  if (amountMatch) expectedAmount = amountMatch[1];
-  const currencyMatch = html.match(/"currency"\s*:\s*"([a-z]+)"/);
-  if (currencyMatch) expectedCurrency = currencyMatch[1];
-  console.log("[DirectAPI] Expected:", expectedAmount, expectedCurrency);
+  try {
+    console.log("[DirectAPI] Fetching session info...");
+    const sessRes = await fetch(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
+      headers: { "Authorization": `Bearer ${pk}` },
+    });
+    if (sessRes.ok) {
+      const sessData = await sessRes.json();
+      if (sessData.amount_total != null) expectedAmount = String(sessData.amount_total);
+      if (sessData.currency) expectedCurrency = sessData.currency;
+      console.log("[DirectAPI] Session data:", expectedAmount, expectedCurrency);
+    } else {
+      console.log("[DirectAPI] Session fetch status:", sessRes.status, "- using defaults");
+    }
+  } catch (e) { console.log("[DirectAPI] Session fetch error:", e.message); }
 
   // Step 2: Confirm payment via Stripe API
   const body = new URLSearchParams();
