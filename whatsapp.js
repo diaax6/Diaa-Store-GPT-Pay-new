@@ -3,10 +3,9 @@
 // No Puppeteer needed! Direct WhatsApp protocol
 // ══════════════════════════════════════════════════════════════════════════
 
-// Polyfill crypto for older Node.js (baileys needs it)
-if (!globalThis.crypto) {
-  globalThis.crypto = require("crypto").webcrypto;
-}
+// Polyfill crypto for Node 18 (has partial crypto without subtle)
+const { webcrypto } = require("crypto");
+globalThis.crypto = webcrypto;
 
 const {
   default: makeWASocket,
