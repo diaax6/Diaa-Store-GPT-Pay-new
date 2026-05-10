@@ -545,52 +545,106 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════════════════
-// GOPAY CONFIG — Phone & PIN management
-// ══════════════════════════════════════════════════════════════════════════
 
-// Get GoPay config
+// Get GoPay config (multi-account)
 app.get("/api/gopay/config", requireAdmin, (req, res) => {
   const cfg = loadConfig();
+  const accounts = cfg.gopayAccounts || [];
   res.json({
+    accounts: accounts.map(a => ({ phone: a.phone, pin: a.pin ? "••••••" : "" })),
+    activeIndex: cfg.gopayActiveIndex || 0,
+    // Legacy single account
     phone: cfg.gopayPhone || "",
-    pin: cfg.gopayPin ? "••••••" : "",
     hasPin: !!cfg.gopayPin,
   });
 });
 
-// Set GoPay config
+// Set GoPay config (multi-account)
 app.post("/api/gopay/config", requireAdmin, (req, res) => {
-  const { phone, pin } = req.body;
+  const { phone, pin, accounts } = req.body;
   const cfg = loadConfig();
-  if (phone !== undefined) cfg.gopayPhone = phone;
-  if (pin !== undefined) cfg.gopayPin = pin;
+
+  // Support array of accounts
+  if (accounts && Array.isArray(accounts)) {
+    cfg.gopayAccounts = accounts;
+    // Also set first as legacy
+    if (accounts.length > 0) {
+      cfg.gopayPhone = accounts[0].phone;
+      cfg.gopayPin = accounts[0].pin;
+    }
+  } else if (phone !== undefined) {
+    // Legacy single account
+    cfg.gopayPhone = phone;
+    if (pin !== undefined) cfg.gopayPin = pin;
+
+    // Also add to accounts array
+    if (!cfg.gopayAccounts) cfg.gopayAccounts = [];
+    const existing = cfg.gopayAccounts.find(a => a.phone === phone);
+    if (existing) {
+      existing.pin = pin || existing.pin;
+    } else {
+      cfg.gopayAccounts.push({ phone, pin });
+    }
+  }
+
+  cfg.gopayActiveIndex = cfg.gopayActiveIndex || 0;
   saveConfig(cfg);
-  console.log("[GoPay] Config updated — phone:", cfg.gopayPhone, "pin:", cfg.gopayPin ? "set" : "not set");
-  res.json({ success: true });
+  console.log("[GoPay] Config updated —", (cfg.gopayAccounts || []).length, "accounts");
+  res.json({ success: true, accountCount: (cfg.gopayAccounts || []).length });
 });
 
-// Test Midtrans automation with a URL
+// Test Midtrans automation — with auto-rotation on rate limit
 app.post("/api/gopay/test", requireAuth, async (req, res) => {
   const { midtransUrl } = req.body;
   if (!midtransUrl) return res.status(400).json({ error: "midtransUrl required" });
 
   const cfg = loadConfig();
-  if (!cfg.gopayPhone || !cfg.gopayPin) {
-    return res.status(400).json({ error: "Set gopayPhone and gopayPin first in /api/gopay/config" });
+  const accounts = cfg.gopayAccounts || [];
+
+  // Fallback to legacy single account
+  if (accounts.length === 0 && cfg.gopayPhone && cfg.gopayPin) {
+    accounts.push({ phone: cfg.gopayPhone, pin: cfg.gopayPin });
   }
 
-  try {
-    const result = await automateGoPay(
-      midtransUrl,
-      cfg.gopayPhone,
-      cfg.gopayPin,
-      (timeout) => whatsapp.waitForOTP(timeout)
-    );
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  if (accounts.length === 0) {
+    return res.status(400).json({ error: "No GoPay accounts configured" });
   }
+
+  let activeIdx = cfg.gopayActiveIndex || 0;
+  if (activeIdx >= accounts.length) activeIdx = 0;
+
+  // Try each account until one works
+  for (let attempt = 0; attempt < accounts.length; attempt++) {
+    const idx = (activeIdx + attempt) % accounts.length;
+    const account = accounts[idx];
+    console.log(`[GoPay] Trying account ${idx + 1}/${accounts.length}: ${account.phone}`);
+
+    try {
+      const result = await automateGoPay(
+        midtransUrl,
+        account.phone,
+        account.pin,
+        (timeout) => whatsapp.waitForOTP(timeout)
+      );
+
+      // If rate limited, try next account
+      if (!result.success && result.error && result.error.includes("5005")) {
+        console.log(`[GoPay] Account ${account.phone} rate limited — trying next...`);
+        continue;
+      }
+
+      // Save which account worked
+      cfg.gopayActiveIndex = idx;
+      saveConfig(cfg);
+
+      return res.json({ ...result, accountUsed: account.phone });
+    } catch (err) {
+      console.log(`[GoPay] Account ${account.phone} error:`, err.message);
+      continue;
+    }
+  }
+
+  res.status(429).json({ error: "All accounts rate limited — try again later" });
 });
 
 // Manual OTP submission — continue after auto-detect fails
@@ -599,8 +653,12 @@ app.post("/api/gopay/submit-otp", requireAuth, async (req, res) => {
   if (!referenceId || !otp) return res.status(400).json({ error: "referenceId and otp required" });
 
   const cfg = loadConfig();
+  const accounts = cfg.gopayAccounts || [];
+  const activeIdx = cfg.gopayActiveIndex || 0;
+  const pin = accounts[activeIdx]?.pin || cfg.gopayPin;
+
   try {
-    const result = await continueWithOTP(referenceId, otp, cfg.gopayPin);
+    const result = await continueWithOTP(referenceId, otp, pin);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
