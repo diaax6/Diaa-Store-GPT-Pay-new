@@ -138,20 +138,70 @@ class WhatsAppOTP extends EventEmitter {
     return this.otpStore[0] || null;
   }
 
-  // Wait for a new OTP (with timeout)
+  // Wait for a new OTP (with timeout) — HYBRID: events + polling
   async waitForOTP(timeoutMs = 120000) {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.removeListener("otp", handler);
-        reject(new Error("OTP timeout"));
-      }, timeoutMs);
+    const startTime = Date.now();
 
-      const handler = (otp) => {
+    return new Promise((resolve, reject) => {
+      let resolved = false;
+
+      const cleanup = () => {
+        resolved = true;
         clearTimeout(timeout);
-        resolve(otp);
+        clearInterval(pollInterval);
+        this.removeListener("otp", handler);
       };
 
+      const timeout = setTimeout(() => {
+        if (!resolved) { cleanup(); reject(new Error("OTP timeout")); }
+      }, timeoutMs);
+
+      // Method 1: Event-based (works for regular messages)
+      const handler = (otp) => {
+        if (!resolved) { cleanup(); resolve(otp); }
+      };
       this.once("otp", handler);
+
+      // Method 2: Poll GoPay chat every 5 seconds (catches business messages)
+      const pollInterval = setInterval(async () => {
+        if (resolved || !this.client || !this.ready) return;
+        try {
+          const chats = await this.client.getChats();
+          // Find GoPay chat — check for "GoPay", "gopay", or business accounts
+          const gopayChat = chats.find(c => {
+            const name = (c.name || "").toLowerCase();
+            return name.includes("gopay") || name.includes("go-pay") || name.includes("gojek");
+          });
+
+          if (gopayChat) {
+            const messages = await gopayChat.fetchMessages({ limit: 3 });
+            for (const msg of messages) {
+              // Only check recent messages (within our wait window)
+              const msgTime = msg.timestamp * 1000;
+              if (msgTime >= startTime) {
+                const text = msg.body || "";
+                const otpMatch = text.match(/\b(\d{4,6})\b/);
+                if (otpMatch && !resolved) {
+                  const otp = {
+                    code: otpMatch[1],
+                    from: msg.from || gopayChat.id._serialized,
+                    body: text.substring(0, 200),
+                    timestamp: Date.now(),
+                  };
+                  console.log(`[WhatsApp] 🔑 OTP found via polling: ${otp.code}`);
+                  this.otpStore.unshift(otp);
+                  if (this.otpStore.length > 20) this.otpStore.length = 20;
+                  cleanup();
+                  resolve(otp);
+                  return;
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // Silently ignore polling errors
+        }
+      }, 5000);
     });
   }
 
