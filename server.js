@@ -363,333 +363,131 @@ app.post("/api/generate-link", requireAuth, async (req, res) => {
 // AUTO-CHECKOUT — Puppeteer automation on Stripe hosted checkout
 // ══════════════════════════════════════════════════════════════════════════
 
-async function runAutoCheckout(checkoutUrl, address, proxy) {
+async function runAutoCheckout(checkoutUrl, address) {
   const puppeteer = require("puppeteer");
-
-  // Debug screenshots directory
   const debugDir = path.join(__dirname, "public", "debug");
   if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
-  const ss = async (page, name) => {
-    try { await page.screenshot({ path: path.join(debugDir, `${name}.png`), fullPage: true }); } catch {}
-  };
-
-  const launchArgs = [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--window-size=1280,900",
-  ];
-
-  let proxyAuth = null;
-  if (proxy) {
-    try {
-      const pUrl = new URL(proxy);
-      launchArgs.push(`--proxy-server=${pUrl.protocol}//${pUrl.hostname}:${pUrl.port}`);
-      if (pUrl.username) {
-        proxyAuth = { username: decodeURIComponent(pUrl.username), password: decodeURIComponent(pUrl.password || "") };
-      }
-    } catch {
-      launchArgs.push(`--proxy-server=${proxy}`);
-    }
-  }
 
   console.log("[AutoCheckout] Launching browser...");
-  const browser = await puppeteer.launch({ headless: "new", args: launchArgs });
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+  });
 
   try {
     const page = await browser.newPage();
-    if (proxyAuth) await page.authenticate(proxyAuth);
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
 
-    // ── Step 1: Navigate ──
-    console.log("[AutoCheckout] Opening:", checkoutUrl.substring(0, 80) + "...");
+    console.log("[AutoCheckout] Loading page...");
     await page.goto(checkoutUrl, { waitUntil: "networkidle2", timeout: 45000 });
-    await delay(4000);
-    await ss(page, "01_loaded");
-
-    // ── Step 2: Click GoPay ──
-    console.log("[AutoCheckout] Selecting GoPay...");
-    const gopayClicked = await page.evaluate(() => {
-      const allEls = document.querySelectorAll("div, span, label, button, li");
-      for (const el of allEls) {
-        const txt = el.textContent?.trim();
-        if (txt === "GoPay" && el.children.length <= 2) {
-          const target = el.closest("[role='radio'], [role='option'], [data-testid], button, label, li") || el.parentElement;
-          if (target) { target.click(); return "found"; }
-        }
-      }
-      return null;
-    });
-    console.log(`[AutoCheckout] GoPay: ${gopayClicked || "NOT FOUND"}`);
     await delay(3000);
-    await ss(page, "02_gopay_clicked");
+    await page.screenshot({ path: path.join(debugDir, "01_loaded.png"), fullPage: true });
 
-    // ── DEBUG: Dump all form elements ──
-    const domDump = await page.evaluate(() => {
-      const els = {};
-      els.inputs = Array.from(document.querySelectorAll("input")).map(e => ({
-        type: e.type, id: e.id, name: e.name, placeholder: e.placeholder,
-        autocomplete: e.autocomplete, visible: e.offsetParent !== null, value: e.value
-      }));
-      els.selects = Array.from(document.querySelectorAll("select")).map(e => ({
-        id: e.id, name: e.name, autocomplete: e.autocomplete, optionCount: e.options.length
-      }));
-      els.buttons = Array.from(document.querySelectorAll("button")).map(e => ({
-        text: e.textContent?.trim().substring(0, 40), type: e.type, disabled: e.disabled
-      }));
-      els.links = Array.from(document.querySelectorAll("a")).map(e => ({
-        text: e.textContent?.trim().substring(0, 50), href: e.href?.substring(0, 50)
-      }));
-      els.checkboxes = Array.from(document.querySelectorAll("[role='checkbox'], input[type='checkbox']")).map(e => ({
-        tag: e.tagName, id: e.id, checked: e.checked, ariaChecked: e.getAttribute('aria-checked')
-      }));
-      els.iframes = Array.from(document.querySelectorAll("iframe")).map(e => ({
-        src: e.src?.substring(0, 80), id: e.id, name: e.name
-      }));
-      return els;
+    // Click GoPay radio
+    console.log("[AutoCheckout] Clicking GoPay...");
+    const gopay = await page.evaluate(() => {
+      for (const el of document.querySelectorAll("div, span, label, li")) {
+        if (el.textContent?.trim() === "GoPay") {
+          const r = el.closest("[role='radio'], label, li, [data-testid]") || el.parentElement;
+          if (r) { r.click(); return true; }
+        }
+      }
+      return false;
     });
-    console.log("[AutoCheckout] === DOM DUMP ===");
-    console.log(JSON.stringify(domDump, null, 2));
-    console.log("[AutoCheckout] === END DUMP ===");
+    console.log("[AutoCheckout] GoPay:", gopay ? "OK" : "NOT FOUND");
+    await delay(3000);
+    await page.screenshot({ path: path.join(debugDir, "02_gopay.png"), fullPage: true });
 
-    // Helper: try clicking first matching selector
-    async function tryClick(selectors) {
-      for (const sel of selectors) {
-        try { await page.waitForSelector(sel, { timeout: 3000 }); await page.click(sel); return sel; } catch {}
+    // Fill Name + Country + Click manual address
+    console.log("[AutoCheckout] Filling name & country...");
+    const p2 = await page.evaluate((addr) => {
+      const log = [];
+      function setVal(el, v) {
+        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        s.call(el, v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
       }
-      return null;
-    }
-    // Helper: try typing into first matching selector
-    async function tryType(selectors, value) {
-      for (const sel of selectors) {
-        try {
-          await page.waitForSelector(sel, { timeout: 3000 });
-          await page.click(sel, { clickCount: 3 });
-          await page.type(sel, value, { delay: 30 });
-          return sel;
-        } catch {}
+      const name = document.querySelector("#billingName, input[autocomplete='name'], input[placeholder*='Name' i]");
+      if (name) { name.focus(); setVal(name, addr.name); log.push("name-ok"); } else log.push("name-MISS");
+      const country = document.querySelector("#billingCountry, select[autocomplete='country']");
+      if (country) { country.value = addr.country; country.dispatchEvent(new Event("change", { bubbles: true })); log.push("country-ok"); } else log.push("country-MISS");
+      for (const l of document.querySelectorAll("a, button, span")) {
+        if (l.textContent?.trim().toLowerCase().includes("enter address manually")) { l.click(); log.push("manual-ok"); break; }
       }
-      return null;
-    }
-
-    // ── Step 3: Fill Name ──
-    console.log("[AutoCheckout] Filling name:", address.name);
-    const nameSel = await tryType(["#billingName", "input[autocomplete='name']", "input[placeholder*='Name' i]", "input[name*='name' i]"], address.name);
-    console.log("[AutoCheckout] Name:", nameSel || "NOT FOUND");
-    await delay(500);
-
-    // ── Step 4: Select Country ──
-    console.log("[AutoCheckout] Selecting country:", address.country);
-    const countrySel = await tryClick(["#billingCountry", "select[autocomplete='country']", "select[name*='country' i]"]);
-    if (countrySel) {
-      try { await page.select(countrySel, address.country); } catch {}
-    }
-    console.log("[AutoCheckout] Country:", countrySel || "NOT FOUND");
+      return log;
+    }, address);
+    console.log("[AutoCheckout] Phase2:", p2.join(", "));
     await delay(2000);
+    await page.screenshot({ path: path.join(debugDir, "03_manual.png"), fullPage: true });
 
-    // ── Step 5: Click "Enter address manually" link ──
-    console.log("[AutoCheckout] Looking for 'Enter address manually'...");
-    const manualClicked = await page.evaluate(() => {
-      const links = document.querySelectorAll("a, button, span, div");
-      for (const link of links) {
-        const txt = link.textContent?.trim().toLowerCase();
-        if (txt && (txt.includes("enter address manually") || txt.includes("enter address"))) {
-          link.click();
-          return txt;
-        }
+    // Fill address fields + checkbox
+    console.log("[AutoCheckout] Filling address...");
+    const p3 = await page.evaluate((addr) => {
+      const log = [];
+      function setVal(el, v) {
+        const s = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+        s.call(el, v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
       }
-      return null;
-    });
-    console.log(`[AutoCheckout] Manual link: ${manualClicked || "NOT FOUND"}`);
-    await delay(2000);
-    await ss(page, "03_manual_address");
-
-    // ── Step 6: Fill Address Line 1 ──
-    console.log("[AutoCheckout] Filling address:", address.addressLine1);
-    const addr1Sel = await tryType(["#billingAddressLine1", "input[autocomplete='address-line1']", "input[placeholder*='Address line 1' i]", "input[placeholder*='Address' i]", "input[name*='addressLine1' i]"], address.addressLine1);
-    console.log("[AutoCheckout] Address1:", addr1Sel || "NOT FOUND");
-    await delay(500);
-
-    // ── Step 7: Fill Address Line 2 (optional) ──
-    if (address.addressLine2) {
-      const addr2Sel = await tryType(["#billingAddressLine2", "input[autocomplete='address-line2']", "input[placeholder*='Address line 2' i]"], address.addressLine2);
-      console.log("[AutoCheckout] Address2:", addr2Sel || "NOT FOUND");
-      await delay(300);
-    }
-
-    // ── Step 8: Fill City ──
-    const citySel = await tryType(["#billingLocality", "input[autocomplete='address-level2']", "input[placeholder*='City' i]", "input[name*='city' i]"], address.city);
-    console.log("[AutoCheckout] City:", citySel || "NOT FOUND");
-    await delay(300);
-
-    // ── Step 9: Fill ZIP ──
-    const zipSel = await tryType(["#billingPostal", "input[autocomplete='postal-code']", "input[placeholder*='ZIP' i]", "input[placeholder*='Postal' i]"], address.zip);
-    console.log("[AutoCheckout] ZIP:", zipSel || "NOT FOUND");
-    await delay(300);
-
-    // ── Step 10: Select State ──
-    if (address.state) {
-      console.log("[AutoCheckout] Selecting state:", address.state);
-      const stateSel = await tryClick(["#billingAdministrativeArea", "select[autocomplete='address-level1']", "select[name*='state' i]"]);
-      if (stateSel) {
-        try { await page.select(stateSel, address.state); } catch {}
+      const a1 = document.querySelector("#billingAddressLine1, input[autocomplete='address-line1'], input[placeholder*='Address line 1' i]");
+      if (a1) { a1.focus(); setVal(a1, addr.addressLine1); log.push("addr1-ok"); } else log.push("addr1-MISS");
+      if (addr.addressLine2) { const a2 = document.querySelector("#billingAddressLine2, input[autocomplete='address-line2']"); if (a2) setVal(a2, addr.addressLine2); }
+      const city = document.querySelector("#billingLocality, input[autocomplete='address-level2'], input[placeholder*='City' i]");
+      if (city) { city.focus(); setVal(city, addr.city); log.push("city-ok"); } else log.push("city-MISS");
+      const zip = document.querySelector("#billingPostal, input[autocomplete='postal-code'], input[placeholder*='ZIP' i]");
+      if (zip) { zip.focus(); setVal(zip, addr.zip); log.push("zip-ok"); } else log.push("zip-MISS");
+      if (addr.state) {
+        const st = document.querySelector("#billingAdministrativeArea, select[autocomplete='address-level1']");
+        if (st) { st.value = addr.state; st.dispatchEvent(new Event("change", { bubbles: true })); log.push("state-ok"); } else log.push("state-MISS");
       }
-      console.log("[AutoCheckout] State:", stateSel || "NOT FOUND");
-      await delay(500);
-    }
-
-    await ss(page, "04_form_filled");
-
-    // ── Step 11: Handle terms checkbox ──
-    console.log("[AutoCheckout] Checking terms checkbox...");
-    // First scroll down to make checkbox visible
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await delay(500);
-
-    const checkboxResult = await page.evaluate(() => {
-      let result = [];
-
-      // Strategy 1: Find checkbox input directly
-      const checkboxes = document.querySelectorAll("input[type='checkbox']");
-      for (const cb of checkboxes) {
-        if (!cb.checked) {
-          cb.click();
-          cb.checked = true;
-          cb.dispatchEvent(new Event('change', { bubbles: true }));
-          cb.dispatchEvent(new Event('input', { bubbles: true }));
-          result.push("input-click");
-        }
-      }
-
-      // Strategy 2: Find by role='checkbox'
-      const roleCheckboxes = document.querySelectorAll("[role='checkbox']");
-      for (const cb of roleCheckboxes) {
-        if (cb.getAttribute('aria-checked') !== 'true') {
-          cb.click();
-          result.push("role-click");
-        }
-      }
-
-      // Strategy 3: Find the terms text container and click its checkbox/label area
-      const allEls = document.querySelectorAll("div, span, p, label");
-      for (const el of allEls) {
-        const txt = el.textContent?.toLowerCase() || "";
-        if (txt.includes("you'll be charged") || txt.includes("terms of use") || txt.includes("you agree")) {
-          // Find checkbox near this text
-          const parent = el.closest("div, label, section");
-          if (parent) {
-            const cb = parent.querySelector("input[type='checkbox'], [role='checkbox']");
-            if (cb) {
-              cb.click();
-              result.push("terms-parent-click");
-            }
-            // Also try clicking the parent container itself
-            const clickable = parent.querySelector("label, [class*='checkbox'], [class*='Checkbox']");
-            if (clickable) {
-              clickable.click();
-              result.push("terms-label-click");
-            }
-          }
-          break;
-        }
-      }
-
-      // Strategy 4: Click any unchecked checkbox-looking element
-      const checkboxLike = document.querySelectorAll("[class*='checkbox' i], [class*='Checkbox'], [data-testid*='checkbox' i]");
-      for (const el of checkboxLike) {
-        el.click();
-        result.push("class-click");
-      }
-
-      return result.length ? result.join(", ") : "none-found";
-    });
-    console.log(`[AutoCheckout] Checkbox strategies used: ${checkboxResult}`);
-
-    // Also try Puppeteer native click on any checkbox
-    try {
-      const cbHandle = await page.$("input[type='checkbox']");
-      if (cbHandle) {
-        const isChecked = await page.evaluate(el => el.checked, cbHandle);
-        if (!isChecked) {
-          await cbHandle.click();
-          console.log("[AutoCheckout] Puppeteer native checkbox click");
-        }
-      }
-    } catch {}
+      const cb = document.querySelector("input[type='checkbox']");
+      if (cb && !cb.checked) { cb.click(); log.push("cb-ok"); }
+      const rcb = document.querySelector("[role='checkbox']");
+      if (rcb) { rcb.click(); log.push("rcb-ok"); }
+      return log;
+    }, address);
+    console.log("[AutoCheckout] Phase3:", p3.join(", "));
     await delay(1000);
-    await ss(page, "05_checkbox_done");
+    await page.screenshot({ path: path.join(debugDir, "04_filled.png"), fullPage: true });
 
-    // ── Step 12: Scroll down and Click Subscribe ──
-    console.log("[AutoCheckout] Clicking Subscribe...");
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await delay(500);
-
-    const subClicked = await page.evaluate(() => {
-      const buttons = document.querySelectorAll("button, [role='button']");
-      for (const btn of buttons) {
-        const txt = btn.textContent?.trim().toLowerCase();
-        if (txt && txt.includes("subscribe")) {
-          btn.scrollIntoView();
-          btn.click();
-          return txt;
-        }
+    // Click Pay/Subscribe button
+    console.log("[AutoCheckout] Clicking Pay...");
+    const btn = await page.evaluate(() => {
+      for (const b of document.querySelectorAll("button")) {
+        const t = b.textContent?.trim().toLowerCase();
+        if (t && (t.includes("subscribe") || t.includes("pay"))) { b.scrollIntoView(); b.click(); return t; }
       }
-      // Fallback: submit button
-      const submit = document.querySelector("button[type='submit']");
-      if (submit) { submit.click(); return "submit-fallback"; }
+      const sub = document.querySelector("button[type='submit']");
+      if (sub) { sub.click(); return "submit"; }
       return null;
     });
-    console.log(`[AutoCheckout] Subscribe: ${subClicked || "NOT FOUND"}`);
-
-    if (!subClicked) {
-      await ss(page, "06_subscribe_NOT_FOUND");
-      // Dump page HTML for debugging
-      const html = await page.content();
-      const allButtons = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('button')).map(b => ({
-          text: b.textContent?.trim().substring(0, 50),
-          type: b.type,
-          disabled: b.disabled,
-          visible: b.offsetParent !== null
-        }));
-      });
-      console.log("[AutoCheckout] All buttons on page:", JSON.stringify(allButtons, null, 2));
-      throw new Error("Could not find Subscribe button — check /debug/ screenshots");
+    console.log("[AutoCheckout] Button:", btn || "NOT FOUND");
+    if (!btn) {
+      await page.screenshot({ path: path.join(debugDir, "05_no_btn.png"), fullPage: true });
+      throw new Error("No Pay/Subscribe button");
     }
-    await ss(page, "06_subscribe_clicked");
 
-    // ── Step 13: Wait for redirect to midtrans/gopay ──
-    console.log("[AutoCheckout] Waiting for GoPay redirect...");
+    // Wait for GoPay redirect
+    console.log("[AutoCheckout] Waiting redirect...");
     let gopayUrl = null;
-
     try {
-      await page.waitForFunction(
-        () => window.location.href.includes("midtrans.com") || window.location.href.includes("gopay"),
-        { timeout: 60000 }
-      );
+      await page.waitForFunction(() => window.location.href.includes("midtrans.com") || window.location.href.includes("gopay"), { timeout: 60000 });
       gopayUrl = page.url();
     } catch {
       await delay(5000);
-      const currentUrl = page.url();
-      if (currentUrl !== checkoutUrl && !currentUrl.includes("stripe.com")) {
-        gopayUrl = currentUrl;
-      }
+      const cur = page.url();
+      if (cur !== checkoutUrl && !cur.includes("stripe.com") && !cur.includes("pay.openai.com")) gopayUrl = cur;
     }
+    await page.screenshot({ path: path.join(debugDir, "06_final.png"), fullPage: true });
+    console.log("[AutoCheckout] Result:", gopayUrl || "NO REDIRECT");
 
-    console.log(`[AutoCheckout] Final URL: ${gopayUrl || "NO REDIRECT"}`);
-
-    return {
-      success: !!gopayUrl,
-      stripeUrl: checkoutUrl,
-      gopayUrl: gopayUrl,
-      addressUsed: address.label,
-      error: gopayUrl ? null : "No redirect detected — checkout may have failed",
-    };
+    return { success: !!gopayUrl, stripeUrl: checkoutUrl, gopayUrl, addressUsed: address.label, error: gopayUrl ? null : "No redirect" };
   } finally {
     await browser.close();
-    console.log("[AutoCheckout] Browser closed.");
+    console.log("[AutoCheckout] Done.");
   }
 }
 
@@ -702,22 +500,17 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
 
   const cfg = loadConfig();
   const addresses = cfg.addresses || [];
-  if (addresses.length === 0) return res.status(400).json({ error: "No addresses configured. Add addresses in Admin Panel." });
+  if (addresses.length === 0) return res.status(400).json({ error: "No addresses configured." });
 
-  // Auto-rotate address
   const address = addresses[addressRotationIndex % addresses.length];
   addressRotationIndex++;
 
-  // NOTE: Don't use proxy for Puppeteer — Stripe/Cloudflare blocks proxy IPs
-  // The proxy is only needed for curl-impersonate API calls
-  const proxy = null;
-
   console.log(`\n${"═".repeat(60)}`);
-  console.log(`[AutoCheckout] Starting — Address: "${address.label}" | Proxy: direct (no proxy)`);
+  console.log(`[AutoCheckout] Starting — Address: "${address.label}"`);
   console.log(`${"═".repeat(60)}`);
 
   try {
-    const result = await runAutoCheckout(checkoutUrl, address, proxy);
+    const result = await runAutoCheckout(checkoutUrl, address);
     return res.json(result);
   } catch (err) {
     console.error("[AutoCheckout] ERROR:", err.message);
