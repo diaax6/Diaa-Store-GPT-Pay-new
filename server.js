@@ -406,8 +406,6 @@ async function runAutoCheckout(checkoutUrl, address) {
   if (address.state) body.append("payment_method_data[billing_details][address][state]", address.state);
   body.append("payment_method_data[billing_details][address][postal_code]", address.zip);
   body.append("expected_amount", expectedAmount);
-  body.append("expected_currency", expectedCurrency);
-  body.append("tos_shown_and_accepted", "true");
 
   const headers = {
     "Authorization": `Bearer ${pk}`,
@@ -417,58 +415,38 @@ async function runAutoCheckout(checkoutUrl, address) {
     "Referer": "https://checkout.stripe.com/",
   };
 
-  // Try multiple possible endpoints
-  const endpoints = [
-    `https://api.stripe.com/v1/payment_pages/${sessionId}/confirm`,
-    `https://api.stripe.com/v1/checkout/sessions/${sessionId}/confirm`,
-  ];
+  // Stripe confirm endpoint
+  const endpoint = `https://api.stripe.com/v1/payment_pages/${sessionId}/confirm`;
 
-  let result = null;
-  let lastError = null;
+  console.log("[DirectAPI] Confirming:", endpoint);
+  const confirmRes = await fetch(endpoint, {
+    method: "POST",
+    headers,
+    body: body.toString(),
+  });
 
-  for (const endpoint of endpoints) {
-    console.log("[DirectAPI] Trying:", endpoint);
-    try {
-      const confirmRes = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: body.toString(),
-      });
+  const data = await confirmRes.json();
+  console.log("[DirectAPI] Status:", confirmRes.status);
+  console.log("[DirectAPI] Response:", JSON.stringify(data).substring(0, 1500));
 
-      const data = await confirmRes.json();
-      console.log("[DirectAPI] Status:", confirmRes.status);
-      console.log("[DirectAPI] Response:", JSON.stringify(data).substring(0, 1000));
-
-      if (confirmRes.status === 200 || confirmRes.status === 303) {
-        result = data;
-        break;
-      }
-      lastError = data;
-    } catch (err) {
-      console.log("[DirectAPI] Error:", err.message);
-      lastError = { error: err.message };
-    }
-  }
-
-  if (!result && lastError) {
-    console.log("[DirectAPI] All endpoints failed. Last error:", JSON.stringify(lastError).substring(0, 500));
-    // Return the error details so we can debug
+  if (confirmRes.status !== 200) {
+    console.log("[DirectAPI] Confirm failed!");
     return {
       success: false,
       stripeUrl: checkoutUrl,
       gopayUrl: null,
       addressUsed: address.label,
-      error: "API confirm failed",
-      debug: JSON.stringify(lastError).substring(0, 500)
+      error: data?.error?.message || "API confirm failed",
+      debug: JSON.stringify(data).substring(0, 500)
     };
   }
 
   // Extract redirect URL from response
-  const gopayUrl = result?.redirect_to_url?.url
-    || result?.next_action?.redirect_to_url?.url
-    || result?.url
-    || result?.redirect_url
-    || result?.payment_intent?.next_action?.redirect_to_url?.url;
+  const gopayUrl = data?.redirect_to_url?.url
+    || data?.next_action?.redirect_to_url?.url
+    || data?.url
+    || data?.redirect_url
+    || data?.payment_intent?.next_action?.redirect_to_url?.url;
 
   console.log("[DirectAPI] GoPay URL:", gopayUrl || "NOT FOUND");
   console.log("[DirectAPI] Done! ✓");
@@ -479,7 +457,7 @@ async function runAutoCheckout(checkoutUrl, address) {
     gopayUrl,
     addressUsed: address.label,
     error: gopayUrl ? null : "No redirect URL in response",
-    debug: gopayUrl ? null : JSON.stringify(result).substring(0, 500)
+    debug: gopayUrl ? null : JSON.stringify(data).substring(0, 500)
   };
 }
 
