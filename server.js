@@ -443,36 +443,48 @@ async function runAutoCheckout(checkoutUrl, address) {
     };
   }
 
-  // Search entire response for Midtrans/GoPay redirect URL
-  const fullJson = JSON.stringify(data);
+  // Log top-level keys and key fields
+  console.log("[DirectAPI] Response keys:", Object.keys(data).join(", "));
+  console.log("[DirectAPI] setup_intent:", JSON.stringify(data.setup_intent)?.substring(0, 200));
+  console.log("[DirectAPI] payment_intent:", JSON.stringify(data.payment_intent)?.substring(0, 200));
 
-  // Try specific paths first
-  let gopayUrl = data?.redirect_to_url?.url
-    || data?.next_action?.redirect_to_url?.url
-    || data?.url
-    || data?.redirect_url
+  // The confirm returns a session — the redirect URL is in the setup_intent/payment_intent
+  let gopayUrl = null;
+
+  // Try to get redirect from nested intent objects (if expanded)
+  gopayUrl = data?.setup_intent?.next_action?.redirect_to_url?.url
     || data?.payment_intent?.next_action?.redirect_to_url?.url
-    || data?.setup_intent?.next_action?.redirect_to_url?.url;
+    || data?.next_action?.redirect_to_url?.url;
 
-  // If not found, search the entire JSON for midtrans URLs
+  // If setup_intent/payment_intent is just an ID string, fetch it separately
   if (!gopayUrl) {
+    const intentId = data?.setup_intent || data?.payment_intent;
+    if (typeof intentId === "string" && intentId.startsWith("seti_")) {
+      console.log("[DirectAPI] Fetching SetupIntent:", intentId);
+      const siRes = await fetch(`https://api.stripe.com/v1/setup_intents/${intentId}`, {
+        headers: { "Authorization": `Bearer ${pk}` },
+      });
+      const siData = await siRes.json();
+      console.log("[DirectAPI] SetupIntent status:", siData.status);
+      console.log("[DirectAPI] SetupIntent next_action:", JSON.stringify(siData.next_action)?.substring(0, 500));
+      gopayUrl = siData?.next_action?.redirect_to_url?.url;
+    } else if (typeof intentId === "string" && intentId.startsWith("pi_")) {
+      console.log("[DirectAPI] Fetching PaymentIntent:", intentId);
+      const piRes = await fetch(`https://api.stripe.com/v1/payment_intents/${intentId}`, {
+        headers: { "Authorization": `Bearer ${pk}` },
+      });
+      const piData = await piRes.json();
+      console.log("[DirectAPI] PaymentIntent status:", piData.status);
+      console.log("[DirectAPI] PaymentIntent next_action:", JSON.stringify(piData.next_action)?.substring(0, 500));
+      gopayUrl = piData?.next_action?.redirect_to_url?.url;
+    }
+  }
+
+  // Fallback: search entire JSON for midtrans URLs
+  if (!gopayUrl) {
+    const fullJson = JSON.stringify(data);
     const midtransMatch = fullJson.match(/https?:\/\/[^"]*midtrans\.com[^"]*/);
     if (midtransMatch) gopayUrl = midtransMatch[0].replace(/\\\//g, "/");
-  }
-
-  // Also try gopay-specific URLs
-  if (!gopayUrl) {
-    const gopayMatch = fullJson.match(/https?:\/\/[^"]*gopay[^"]*/i);
-    if (gopayMatch) gopayUrl = gopayMatch[0].replace(/\\\//g, "/");
-  }
-
-  // Log key parts of the response to help debug
-  if (!gopayUrl) {
-    console.log("[DirectAPI] Full response length:", fullJson.length);
-    // Find any URLs in the response
-    const urls = fullJson.match(/https?:\/\/[^"\\]+/g) || [];
-    const uniqueUrls = [...new Set(urls)].filter(u => !u.includes("cloudfront") && !u.includes("stripe.com/files"));
-    console.log("[DirectAPI] URLs found:", JSON.stringify(uniqueUrls.slice(0, 15)));
   }
 
   console.log("[DirectAPI] GoPay URL:", gopayUrl || "NOT FOUND");
