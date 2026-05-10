@@ -443,12 +443,37 @@ async function runAutoCheckout(checkoutUrl, address) {
     };
   }
 
-  // Extract redirect URL from response
-  const gopayUrl = data?.redirect_to_url?.url
+  // Search entire response for Midtrans/GoPay redirect URL
+  const fullJson = JSON.stringify(data);
+
+  // Try specific paths first
+  let gopayUrl = data?.redirect_to_url?.url
     || data?.next_action?.redirect_to_url?.url
     || data?.url
     || data?.redirect_url
-    || data?.payment_intent?.next_action?.redirect_to_url?.url;
+    || data?.payment_intent?.next_action?.redirect_to_url?.url
+    || data?.setup_intent?.next_action?.redirect_to_url?.url;
+
+  // If not found, search the entire JSON for midtrans URLs
+  if (!gopayUrl) {
+    const midtransMatch = fullJson.match(/https?:\/\/[^"]*midtrans\.com[^"]*/);
+    if (midtransMatch) gopayUrl = midtransMatch[0].replace(/\\\//g, "/");
+  }
+
+  // Also try gopay-specific URLs
+  if (!gopayUrl) {
+    const gopayMatch = fullJson.match(/https?:\/\/[^"]*gopay[^"]*/i);
+    if (gopayMatch) gopayUrl = gopayMatch[0].replace(/\\\//g, "/");
+  }
+
+  // Log key parts of the response to help debug
+  if (!gopayUrl) {
+    console.log("[DirectAPI] Full response length:", fullJson.length);
+    // Find any URLs in the response
+    const urls = fullJson.match(/https?:\/\/[^"\\]+/g) || [];
+    const uniqueUrls = [...new Set(urls)].filter(u => !u.includes("cloudfront") && !u.includes("stripe.com/files"));
+    console.log("[DirectAPI] URLs found:", JSON.stringify(uniqueUrls.slice(0, 15)));
+  }
 
   console.log("[DirectAPI] GoPay URL:", gopayUrl || "NOT FOUND");
   console.log("[DirectAPI] Done! ✓");
