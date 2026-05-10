@@ -154,9 +154,26 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
             await page.screenshot({ path: path.join(debugDir, "mt_03b_gopay_auth.png"), fullPage: true });
             console.log("[Midtrans] GoPay auth page loaded!");
             
-            // Dump the page content to see what we're working with
+            // Dump the page content
             const pageContent = await page.evaluate(() => document.body?.innerText?.substring(0, 500) || "");
             console.log("[Midtrans] Page text:", pageContent.substring(0, 300));
+
+            // Click "Hubungkan" (Connect) button to trigger OTP!
+            console.log("[Midtrans] Clicking Hubungkan to trigger OTP...");
+            const hubungkanClicked = await clickButton(page, [
+              "Hubungkan", "Connect", "Link", "Lanjut", "Lanjutkan",
+              "Continue", "Authorize", "Confirm", "OK",
+            ]);
+            
+            if (hubungkanClicked) {
+              console.log("[Midtrans] ✅ Hubungkan clicked — OTP should be sent!");
+            } else {
+              console.log("[Midtrans] ⚠️ Hubungkan button not found");
+              await dumpButtons(page);
+            }
+            
+            await delay(3000);
+            await page.screenshot({ path: path.join(debugDir, "mt_03c_after_hubungkan.png"), fullPage: true });
           }
         } catch (e) {
           console.log("[Midtrans] Parse error:", e.message);
