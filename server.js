@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const { COUNTRIES_LIST, STATES } = require("./countries");
 const whatsapp = require("./whatsapp");
+const { automateGoPay } = require("./midtrans-auto");
 
 const app = express();
 const PORT = 3000;
@@ -545,6 +546,54 @@ app.post("/api/auto-checkout", requireAuth, async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════════════════════
+// GOPAY CONFIG — Phone & PIN management
+// ══════════════════════════════════════════════════════════════════════════
+
+// Get GoPay config
+app.get("/api/gopay/config", requireAdmin, (req, res) => {
+  const cfg = loadConfig();
+  res.json({
+    phone: cfg.gopayPhone || "",
+    pin: cfg.gopayPin ? "••••••" : "",
+    hasPin: !!cfg.gopayPin,
+  });
+});
+
+// Set GoPay config
+app.post("/api/gopay/config", requireAdmin, (req, res) => {
+  const { phone, pin } = req.body;
+  const cfg = loadConfig();
+  if (phone !== undefined) cfg.gopayPhone = phone;
+  if (pin !== undefined) cfg.gopayPin = pin;
+  saveConfig(cfg);
+  console.log("[GoPay] Config updated — phone:", cfg.gopayPhone, "pin:", cfg.gopayPin ? "set" : "not set");
+  res.json({ success: true });
+});
+
+// Test Midtrans automation with a URL
+app.post("/api/gopay/test", requireAdmin, async (req, res) => {
+  const { midtransUrl } = req.body;
+  if (!midtransUrl) return res.status(400).json({ error: "midtransUrl required" });
+
+  const cfg = loadConfig();
+  if (!cfg.gopayPhone || !cfg.gopayPin) {
+    return res.status(400).json({ error: "Set gopayPhone and gopayPin first in /api/gopay/config" });
+  }
+
+  try {
+    const result = await automateGoPay(
+      midtransUrl,
+      cfg.gopayPhone,
+      cfg.gopayPin,
+      (timeout) => whatsapp.waitForOTP(timeout)
+    );
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
 // WHATSAPP — OTP Listener endpoints
 // ══════════════════════════════════════════════════════════════════════════
 
@@ -679,9 +728,28 @@ app.post("/api/full-checkout", requireAuth, async (req, res) => {
     return res.json({ success: false, steps, error: `Stripe: ${err.message}` });
   }
 
-  // Step 2: GoPay automation (TODO — will be implemented after Midtrans API capture)
-  steps.gopay = { status: "manual", url: steps.stripe.gopayUrl };
-  console.log("[FullCheckout] Step 2: GoPay URL ready (manual for now):", steps.stripe.gopayUrl);
+  // Step 2: GoPay automation
+  const gopayPhone = cfg.gopayPhone;
+  const gopayPin = cfg.gopayPin;
+
+  if (gopayPhone && gopayPin && steps.stripe.gopayUrl) {
+    try {
+      console.log("[FullCheckout] Step 2: GoPay automation...");
+      steps.gopay = await automateGoPay(
+        steps.stripe.gopayUrl,
+        gopayPhone,
+        gopayPin,
+        (timeout) => whatsapp.waitForOTP(timeout)
+      );
+      console.log("[FullCheckout] Step 2:", steps.gopay.success ? "✅ GoPay Done" : "❌ GoPay Failed");
+    } catch (err) {
+      steps.gopay = { success: false, error: err.message };
+      console.log("[FullCheckout] Step 2: ❌", err.message);
+    }
+  } else {
+    steps.gopay = { status: "manual", url: steps.stripe.gopayUrl, reason: !gopayPhone ? "No phone" : "No PIN" };
+    console.log("[FullCheckout] Step 2: Manual —", !gopayPhone ? "gopayPhone not set" : "gopayPin not set");
+  }
 
   // Step 3: Cancel subscription
   if (accessToken) {
