@@ -3,6 +3,11 @@
 // No Puppeteer needed! Direct WhatsApp protocol
 // ══════════════════════════════════════════════════════════════════════════
 
+// Polyfill crypto for older Node.js (baileys needs it)
+if (!globalThis.crypto) {
+  globalThis.crypto = require("crypto").webcrypto;
+}
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
