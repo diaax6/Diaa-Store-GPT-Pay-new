@@ -384,20 +384,61 @@ async function runAutoCheckout(checkoutUrl, address) {
     await delay(3000);
     await page.screenshot({ path: path.join(debugDir, "01_loaded.png"), fullPage: true });
 
-    // Click GoPay radio
+    // Click GoPay radio — must use REAL Puppeteer click (not evaluate)
     console.log("[AutoCheckout] Clicking GoPay...");
-    const gopay = await page.evaluate(() => {
-      for (const el of document.querySelectorAll("div, span, label, li")) {
-        if (el.textContent?.trim() === "GoPay") {
-          const r = el.closest("[role='radio'], label, li, [data-testid]") || el.parentElement;
-          if (r) { r.click(); return true; }
+    let gopayClicked = false;
+    try {
+      // Find GoPay text element and get its bounding box for real click
+      const gopayPos = await page.evaluate(() => {
+        for (const el of document.querySelectorAll("div, span, label, li")) {
+          if (el.textContent?.trim() === "GoPay" && el.children.length <= 2) {
+            const rect = el.getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          }
         }
+        return null;
+      });
+      if (gopayPos) {
+        await page.mouse.click(gopayPos.x, gopayPos.y);
+        gopayClicked = true;
       }
-      return false;
-    });
-    console.log("[AutoCheckout] GoPay:", gopay ? "OK" : "NOT FOUND");
+    } catch (e) { console.log("[AutoCheckout] GoPay click error:", e.message); }
+    console.log("[AutoCheckout] GoPay:", gopayClicked ? "CLICKED" : "NOT FOUND");
     await delay(3000);
     await page.screenshot({ path: path.join(debugDir, "02_gopay.png"), fullPage: true });
+
+    // Wait for Name field to appear (it only shows after GoPay is selected)
+    console.log("[AutoCheckout] Waiting for billing form...");
+    try {
+      await page.waitForSelector("#billingName, input[autocomplete='name']", { timeout: 8000 });
+      console.log("[AutoCheckout] Billing form appeared!");
+    } catch {
+      console.log("[AutoCheckout] Billing form not found — trying GoPay click again...");
+      // Try clicking the radio button directly
+      try {
+        const radioPos = await page.evaluate(() => {
+          const radios = document.querySelectorAll("[role='radio'], input[type='radio']");
+          for (const r of radios) {
+            const parent = r.closest("div, label, li");
+            if (parent && parent.textContent?.includes("GoPay")) {
+              const rect = r.getBoundingClientRect();
+              return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+            }
+          }
+          // Try second payment option (GoPay is usually the 2nd)
+          if (radios.length >= 2) {
+            const rect = radios[1].getBoundingClientRect();
+            return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+          }
+          return null;
+        });
+        if (radioPos) {
+          await page.mouse.click(radioPos.x, radioPos.y);
+          await delay(3000);
+        }
+      } catch {}
+      await page.screenshot({ path: path.join(debugDir, "02b_gopay_retry.png"), fullPage: true });
+    }
 
     // Fill Name + Country + Click manual address
     console.log("[AutoCheckout] Filling name & country...");
