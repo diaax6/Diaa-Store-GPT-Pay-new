@@ -679,19 +679,25 @@ app.post("/api/whatsapp/add", requireAdmin, async (req, res) => {
   const { id, phone } = req.body;
   if (!id || !phone) return res.status(400).json({ error: "id and phone required" });
   try {
-    // Add client with pairing code — one step!
     const client = await whatsapp.addClient(id, phone, true, phone);
 
-    // Wait a moment for pairing code to be generated
-    await new Promise(r => setTimeout(r, 5000));
+    // Wait for pairing code event (up to 20s)
+    const code = await new Promise((resolve) => {
+      const timeout = setTimeout(() => resolve(null), 20000);
+      client.once("pairing_code", (code) => {
+        clearTimeout(timeout);
+        resolve(code);
+      });
+      // Check if already available
+      if (client.pairingCode) { clearTimeout(timeout); resolve(client.pairingCode); }
+    });
 
-    const status = client.getStatus();
     res.json({
       success: true,
-      pairingCode: status.pairingCode,
-      message: status.pairingCode
-        ? `Enter ${status.pairingCode} on WhatsApp → Linked Devices → Link with phone number`
-        : `Client ${id} initializing... check /api/whatsapp/status`,
+      pairingCode: code,
+      message: code
+        ? `Enter ${code} on WhatsApp → Linked Devices → Link with phone number`
+        : "Initializing... check pm2 logs for pairing code",
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

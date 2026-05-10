@@ -69,12 +69,25 @@ class WhatsAppClient extends EventEmitter {
     this.sock.ev.on("creds.update", saveCreds);
 
     // Connection updates
-    this.sock.ev.on("connection.update", (update) => {
+    this.sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
-      if (qr) {
+      // When QR appears → socket is ready for auth
+      if (qr && this._usePairingCode && this._pairingPhone && !this._isRegistered && !this.pairingCode) {
+        // Request pairing code INSTEAD of QR scan
+        console.log(`[WA:${this.id}] QR received — requesting pairing code instead...`);
+        try {
+          const code = await this.sock.requestPairingCode(this._pairingPhone);
+          this.pairingCode = code;
+          console.log(`[WA:${this.id}] 🔗 PAIRING CODE: ${code}`);
+          console.log(`[WA:${this.id}] Enter on WhatsApp → Linked Devices → Link with phone number`);
+          this.emit("pairing_code", code);
+        } catch (err) {
+          console.error(`[WA:${this.id}] ❌ Pairing error:`, err.message);
+        }
+      } else if (qr && !this._usePairingCode) {
         this.qrCode = qr;
-        console.log(`[WA:${this.id}] QR Code available`);
+        console.log(`[WA:${this.id}] QR Code available — scan it`);
         this.emit("qr", qr);
       }
 
@@ -83,6 +96,7 @@ class WhatsAppClient extends EventEmitter {
         this.qrCode = null;
         this.pairingCode = null;
         this.reconnectAttempts = 0;
+        this._isRegistered = true;
         console.log(`[WA:${this.id}] ✅ Connected! (${this.phoneLabel})`);
         this.emit("ready");
       }
@@ -97,7 +111,6 @@ class WhatsAppClient extends EventEmitter {
           shouldReconnect ? "— will reconnect" : "— logged out"
         );
 
-        // Only reconnect if already registered (not fresh sessions)
         if (shouldReconnect && this._isRegistered && this.reconnectAttempts < this.maxReconnects) {
           this.reconnectAttempts++;
           console.log(`[WA:${this.id}] Reconnecting in 5s... (attempt ${this.reconnectAttempts})`);
@@ -113,22 +126,18 @@ class WhatsAppClient extends EventEmitter {
       for (const msg of messages) {
         if (!msg.message || msg.key.fromMe) continue;
 
-        // Extract text from any message type
         const text = this._extractText(msg);
         const from = msg.key.remoteJid || "";
 
         if (text) {
           console.log(`[WA:${this.id}] 📩 ${from}: ${text.substring(0, 80)}`);
 
-          // Check for OTP (4-6 digits)
           const otpMatch = text.match(/\b(\d{4,6})\b/);
           if (otpMatch) {
             const otp = {
-              code: otpMatch[1],
-              from,
+              code: otpMatch[1], from,
               body: text.substring(0, 200),
-              timestamp: Date.now(),
-              clientId: this.id,
+              timestamp: Date.now(), clientId: this.id,
             };
             console.log(`[WA:${this.id}] 🔑 OTP: ${otp.code}`);
             this.otpStore.unshift(otp);
@@ -138,23 +147,6 @@ class WhatsAppClient extends EventEmitter {
         }
       }
     });
-
-    // ── Request pairing code AFTER all events are registered ──
-    if (usePairingCode && pairingPhone && !state.creds.registered) {
-      console.log(`[WA:${this.id}] Requesting pairing code for ${pairingPhone}...`);
-      // Wait for socket handshake
-      await new Promise((r) => setTimeout(r, 5000));
-      try {
-        const code = await this.sock.requestPairingCode(pairingPhone);
-        this.pairingCode = code;
-        console.log(`[WA:${this.id}] 🔗 PAIRING CODE: ${code}`);
-        console.log(`[WA:${this.id}] Enter on WhatsApp → Linked Devices → Link with phone number`);
-        this.emit("pairing_code", code);
-      } catch (err) {
-        console.error(`[WA:${this.id}] ❌ Pairing error:`, err.message);
-        console.error(`[WA:${this.id}] Full error:`, err);
-      }
-    }
   }
 
   // Extract text from ANY message type (regular, template, button, etc.)
