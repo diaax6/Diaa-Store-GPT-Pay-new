@@ -294,38 +294,68 @@ async function continueWithOTP(referenceId, otpCode, pin) {
     } catch(e) {}
 
     if (pinToken && callbackUrl) {
-      console.log("[GoPay-API] Step 7: Calling callback to finalize linking...");
+      console.log("[GoPay-API] Step 7: Calling callback (no redirect follow)...");
       const cbUrl = callbackUrl + (callbackUrl.includes("?") ? "&" : "?") + "pin_token=" + pinToken;
-      const cbRes = await fetch(cbUrl, {
-        method: "GET",
-        headers: { "User-Agent": UA, "Accept": "application/json, text/html, */*" },
-        redirect: "follow",
-      });
-      const cbData = await cbRes.text();
-      console.log("[GoPay-API] Step 7 callback (status " + cbRes.status + "):", cbData.substring(0, 500));
-
-      // Check if callback returns payment authorization needed
-      try {
-        const cbJson = JSON.parse(cbData);
-        if (cbJson.data?.next_action && cbJson.data.next_action.includes("pay")) {
-          console.log("[GoPay-API] Step 8: Payment authorization needed — next:", cbJson.data.next_action);
-          // Authorize payment
-          const payRes = await fetch("https://gwa.gopayapi.com/v1/payment/authorize", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Accept": "application/json",
-              "User-Agent": UA,
-              "Origin": "https://merchants-gws-app.gopayapi.com",
-              "Referer": "https://merchants-gws-app.gopayapi.com/",
-            },
-            body: JSON.stringify({ reference_id: referenceId }),
-          });
-          const payData = await payRes.text();
-          console.log("[GoPay-API] Step 8 payment response (status " + payRes.status + "):", payData.substring(0, 500));
+      
+      // Follow redirects manually to capture payment reference
+      let currentUrl = cbUrl;
+      let paymentRef = null;
+      for (let i = 0; i < 5; i++) {
+        const res = await fetch(currentUrl, {
+          method: "GET",
+          headers: { "User-Agent": UA, "Accept": "application/json, text/html, */*" },
+          redirect: "manual",
+        });
+        const location = res.headers.get("location");
+        console.log(`[GoPay-API] Step 7 redirect ${i} (status ${res.status}): ${location || "(no redirect)"}`);
+        
+        // Check if redirect URL contains a payment reference
+        if (location) {
+          const refMatch = location.match(/reference[=:]([a-f0-9-]+)/i);
+          if (refMatch) {
+            paymentRef = refMatch[1];
+            console.log("[GoPay-API] Step 7: Found payment reference:", paymentRef);
+          }
+          currentUrl = location.startsWith("http") ? location : new URL(location, currentUrl).href;
+        } else {
+          // No more redirects — read the final response
+          const body = await res.text();
+          console.log("[GoPay-API] Step 7 final body:", body.substring(0, 300));
+          
+          // Try to extract reference from response body
+          const bodyRef = body.match(/reference[=:]([a-f0-9-]+)/i);
+          if (bodyRef) paymentRef = bodyRef[1];
+          break;
         }
-      } catch(e) {
-        console.log("[GoPay-API] Step 7 callback was not JSON — likely redirect HTML");
+      }
+
+      // Step 8: If we found a payment reference, run the payment flow
+      if (paymentRef && paymentRef !== referenceId) {
+        console.log("[GoPay-API] Step 8: Starting PAYMENT flow with ref:", paymentRef);
+        
+        // 8a: Validate payment reference
+        const valRes = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": UA,
+            "Origin": "https://merchants-gws-app.gopayapi.com",
+            "Referer": "https://merchants-gws-app.gopayapi.com/",
+          },
+          body: JSON.stringify({ reference_id: paymentRef }),
+        });
+        const valData = await valRes.text();
+        console.log("[GoPay-API] Step 8a validate (status " + valRes.status + "):", valData.substring(0, 500));
+
+        // Return for manual OTP again
+        return {
+          success: false,
+          waitingForOTP: true,
+          referenceId: paymentRef,
+          isPayment: true,
+          message: "Linking complete! Payment OTP sent — enter it manually",
+          step: 8,
+        };
       }
     }
   }
