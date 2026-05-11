@@ -6,6 +6,7 @@ const path = require("path");
 const { COUNTRIES_LIST, STATES } = require("./countries");
 const whatsapp = require("./whatsapp");
 const { automateGoPay, continueWithOTP } = require("./midtrans-auto");
+const { automateGoPayBrowser } = require("./gopay-puppeteer");
 
 const app = express();
 const PORT = 3000;
@@ -75,6 +76,18 @@ function requireAdmin(req, res, next) {
 
 // ── Static files (login page always accessible) ───────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
+
+// ── Screenshots (Puppeteer debug) ─────────────────────────────────────────
+app.use("/screenshots", express.static(path.join(__dirname, "screenshots")));
+app.get("/api/screenshots", requireAuth, (req, res) => {
+  const dir = path.join(__dirname, "screenshots");
+  if (!fs.existsSync(dir)) return res.json({ files: [] });
+  const files = fs.readdirSync(dir)
+    .filter(f => f.endsWith(".png") || f.endsWith(".html"))
+    .sort((a, b) => b.localeCompare(a)) // newest first
+    .map(f => ({ name: f, url: `/screenshots/${f}`, size: fs.statSync(path.join(dir, f)).size }));
+  res.json({ files });
+});
 
 // ── Auth routes ───────────────────────────────────────────────────────────
 app.post("/api/auth/login", (req, res) => {
@@ -645,6 +658,46 @@ app.post("/api/gopay/test", requireAuth, async (req, res) => {
   }
 
   res.status(429).json({ error: "All accounts rate limited — try again later" });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// GoPay Puppeteer — Browser-based payment (solves the payment step issue)
+// ══════════════════════════════════════════════════════════════════════════
+app.post("/api/gopay/browser", requireAuth, async (req, res) => {
+  const { midtransUrl } = req.body;
+  if (!midtransUrl) return res.status(400).json({ error: "midtransUrl required" });
+
+  const cfg = loadConfig();
+  const accounts = cfg.gopayAccounts || [];
+
+  if (accounts.length === 0 && cfg.gopayPhone && cfg.gopayPin) {
+    accounts.push({ phone: cfg.gopayPhone, pin: cfg.gopayPin });
+  }
+  if (accounts.length === 0) {
+    return res.status(400).json({ error: "No GoPay accounts configured" });
+  }
+
+  let activeIdx = cfg.gopayActiveIndex || 0;
+  if (activeIdx >= accounts.length) activeIdx = 0;
+  const account = accounts[activeIdx];
+
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`[GoPay-Browser] Starting Puppeteer payment`);
+  console.log(`[GoPay-Browser] Account: ${account.phone}`);
+  console.log(`${'═'.repeat(60)}`);
+
+  try {
+    const result = await automateGoPayBrowser(
+      midtransUrl,
+      account.phone,
+      account.pin,
+      (timeout) => whatsapp.waitForOTP(timeout)
+    );
+    return res.json({ ...result, accountUsed: account.phone });
+  } catch (err) {
+    console.error("[GoPay-Browser] ERROR:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Manual OTP submission — continue after auto-detect fails

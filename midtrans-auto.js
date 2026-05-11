@@ -12,29 +12,57 @@ const UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, 
 // Use curl instead of Node's fetch — Node 18 fetch gets 429 from Midtrans
 const FALLBACK_PROXY = "http://06396179dae9c48c081b__cr.tr,jp:e4f2b32b4aacd0d7@gw.dataimpulse.com:823";
 
-function curlPost(url, headers, body) {
-  // Load proxy from config, fallback to hardcoded
+// Add random session ID to proxy URL → forces fresh IP each call
+function getRotatedProxy() {
   let proxy = FALLBACK_PROXY;
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf-8"));
     proxy = cfg.globalProxy || cfg.checkoutProxy || FALLBACK_PROXY;
   } catch(e) {}
+  
+  // Inject random session into DataImpulse proxy: user__s.RANDOM:pass@host
+  const sessionId = "gp" + Date.now() + Math.random().toString(36).slice(2, 6);
+  // Insert __s.SESSION before the colon separating user options from password
+  proxy = proxy.replace(
+    /(__cr\.[a-z,]+)(:.+@)/i,
+    `$1,__s.${sessionId}$2`
+  );
+  return proxy;
+}
 
-  const proxyArg = proxy ? ` -x "${proxy}"` : "";
-  console.log("[curlPost] proxy:", proxy ? "YES (" + proxy.substring(0, 30) + "...)" : "NONE");
+function curlPost(url, headers, body, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const proxy = getRotatedProxy();
+    const proxyArg = proxy ? ` -x "${proxy}"` : "";
+    if (attempt === 1) console.log("[curlPost] proxy:", proxy ? "YES (session rotated)" : "NONE");
+    if (attempt > 1) console.log("[curlPost] Retry #" + attempt + " with fresh IP...");
 
-  const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
-  const cmd = `curl -s -w "\\n__HTTP__%{http_code}" --connect-timeout 15 --max-time 25 -X POST "${url}" ${headerArgs}${proxyArg} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
-  try {
-    const raw = execSync(cmd, { timeout: 30000, encoding: "utf-8" });
-    const parts = raw.split("\n__HTTP__");
-    const responseBody = parts[0];
-    const statusCode = parseInt(parts[1]) || 0;
-    return { text: responseBody, status: statusCode, json: () => JSON.parse(responseBody) };
-  } catch (e) {
-    console.log("[curlPost] ERROR:", e.message?.substring(0, 100));
-    return { text: "", status: 0, json: () => ({}) };
+    const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
+    const cmd = `curl -s -w "\\n__HTTP__%{http_code}" --connect-timeout 15 --max-time 25 -X POST "${url}" ${headerArgs}${proxyArg} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
+    try {
+      const raw = execSync(cmd, { timeout: 30000, encoding: "utf-8" });
+      const parts = raw.split("\n__HTTP__");
+      const responseBody = parts[0];
+      const statusCode = parseInt(parts[1]) || 0;
+      
+      if (statusCode === 429 && attempt < retries) {
+        const delay = attempt * 3000 + Math.random() * 2000;
+        console.log(`[curlPost] 429 rate-limited — waiting ${(delay/1000).toFixed(1)}s before retry...`);
+        execSync(`sleep ${(delay/1000).toFixed(1)}`);
+        continue;
+      }
+      
+      return { text: responseBody, status: statusCode, json: () => JSON.parse(responseBody) };
+    } catch (e) {
+      console.log("[curlPost] ERROR:", e.message?.substring(0, 100));
+      if (attempt < retries) {
+        execSync("sleep 2");
+        continue;
+      }
+      return { text: "", status: 0, json: () => ({}) };
+    }
   }
+  return { text: "", status: 0, json: () => ({}) };
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -52,6 +80,121 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
   const snapToken = midtransUrl.split("/redirection/")[1]?.split("?")[0]?.split("#")[0];
   if (!snapToken) {
     return { success: false, error: "Could not extract snap token from URL" };
+  }
+
+  // ── Step 0: Check if GoPay is already linked ────────────────────
+  console.log("[GoPay-API] Step 0: Checking if GoPay already linked...");
+  try {
+    const inqRes = await fetch(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/gopay`, {
+      headers: { "Authorization": MIDTRANS_AUTH, "User-Agent": UA },
+    });
+    const inqData = await inqRes.json();
+    console.log("[GoPay-API] Step 0 inquiry:", JSON.stringify(inqData));
+    
+    if (inqData.account_status === "ENABLED") {
+      console.log("[GoPay-API] Step 0: ✅ GoPay ALREADY LINKED! Skipping to charge...");
+      
+      // Go straight to charge — no linking needed!
+      const chargeRes = await fetch(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": MIDTRANS_AUTH,
+          "User-Agent": UA,
+        },
+        body: JSON.stringify({ payment_type: "gopay" }),
+      });
+      const chargeText = await chargeRes.text();
+      console.log("[GoPay-API] Step 0 charge (status " + chargeRes.status + "):", chargeText.substring(0, 800));
+      
+      let chargeData;
+      try { chargeData = JSON.parse(chargeText); } catch(e) {}
+      
+      const verificationUrl = chargeData?.gopay_verification_link_url;
+      console.log("[GoPay-API] gopay_verification_link_url:", verificationUrl || "NULL");
+      
+      if (verificationUrl) {
+        // ✅ TOKENIZED PAYMENT! Extract reference and authorize
+        let paymentRef;
+        try { paymentRef = new URL(verificationUrl).searchParams.get("reference"); } catch(e) {}
+        if (!paymentRef) {
+          const m = verificationUrl.match(/reference[=:]([a-f0-9-]{36})/i);
+          paymentRef = m ? m[1] : null;
+        }
+        
+        if (paymentRef) {
+          console.log("[GoPay-API] ✅ Payment reference:", paymentRef);
+          
+          // Validate → Process → PIN → Confirm
+          await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "User-Agent": UA, "Origin": "https://gwc.gopayapi.com" },
+            body: JSON.stringify({ reference_id: paymentRef }),
+          });
+          
+          const procRes = await fetch("https://gwa.gopayapi.com/v1/payment/process", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "User-Agent": UA, "Origin": "https://gwc.gopayapi.com" },
+            body: JSON.stringify({ reference_id: paymentRef }),
+          });
+          const procText = await procRes.text();
+          console.log("[GoPay-API] Payment process:", procText.substring(0, 500));
+          
+          let procJson; try { procJson = JSON.parse(procText); } catch(e) {}
+          const challenge = procJson?.data?.challenge?.action?.value;
+          
+          if (challenge?.challenge_id && pin) {
+            const cbUrl = `https://gwc.gopayapi.com/payment/provider-redirect?reference=${paymentRef}&action=payment-validate-pin`;
+            await fetch(`https://customer.gopayapi.com/api/v2/challenges/${challenge.challenge_id}/pin-page/nb?redirect_url=${encodeURIComponent(cbUrl)}`,
+              { headers: { "Accept": "application/json", "User-Agent": UA } });
+            
+            const pinRes = await fetch("https://customer.gopayapi.com/api/v1/users/pin/tokens/nb", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "User-Agent": UA },
+              body: JSON.stringify({ challenge_id: challenge.challenge_id, client_id: challenge.client_id, pin }),
+            });
+            const pinData = await pinRes.text();
+            console.log("[GoPay-API] PIN response:", pinData.substring(0, 200));
+            
+            let pToken = ""; try { pToken = JSON.parse(pinData)?.data?.token || ""; } catch(e) {}
+            if (pToken) {
+              const conf = await fetch("https://gwa.gopayapi.com/v1/payment/confirm", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "User-Agent": UA, "Origin": "https://gwc.gopayapi.com" },
+                body: JSON.stringify({ reference_id: paymentRef, token: pToken }),
+              });
+              console.log("[GoPay-API] Confirm:", (await conf.text()).substring(0, 300));
+            }
+          }
+          
+          // Poll for settlement
+          for (let i = 0; i < 10; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const st = await fetch(`https://app.midtrans.com/snap/v1/transactions/${snapToken}/status`,
+              { headers: { "Authorization": MIDTRANS_AUTH, "User-Agent": UA } });
+            const stText = await st.text();
+            console.log("[GoPay-API] Poll #" + (i+1) + ":", stText.substring(0, 200));
+            let stJson; try { stJson = JSON.parse(stText); } catch(e) {}
+            if (stJson?.transaction_status === "settlement" || stJson?.transaction_status === "capture") {
+              return { success: true, message: "✅ GoPay payment SETTLED!" };
+            }
+          }
+          return { success: true, paymentRef, message: "Payment initiated via tokenization" };
+        }
+      }
+      
+      // No verification URL — return charge info for manual handling
+      console.log("[GoPay-API] ⚠️ No verification URL — regular GoPay deeplink payment");
+      return {
+        success: false,
+        error: "GoPay linked but no verification URL. Deeplink: " + (chargeData?.deeplink_url || "none"),
+        deeplink_url: chargeData?.deeplink_url,
+        qr_code_url: chargeData?.qr_code_url,
+        step: 0,
+      };
+    }
+  } catch(e) {
+    console.log("[GoPay-API] Step 0 inquiry error:", e.message, "— proceeding to linking...");
   }
 
   // ── Step 1: Midtrans Linking ─────────────────────────────────────
@@ -404,7 +547,7 @@ async function continueWithOTP(referenceId, otpCode, pin) {
     console.log("[GoPay-API] Step 9a error:", e.message);
   }
 
-  // THE charge endpoint from Midtrans snap JS
+  // THE charge endpoint — with gopay.tokenization flag for tokenized payment
   let chargeRes, chargeText = "";
   try {
     chargeRes = await fetch(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
@@ -414,49 +557,157 @@ async function continueWithOTP(referenceId, otpCode, pin) {
         "Authorization": MIDTRANS_AUTH,
         "User-Agent": UA,
       },
-      body: JSON.stringify({ payment_type: "gopay" }),
+      body: JSON.stringify({ payment_type: "gopay", gopay: { tokenization: true } }),
     });
     chargeText = await chargeRes.text();
-    console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeText.substring(0, 500));
+    console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeText.substring(0, 800));
   } catch(e) {
     console.log("[GoPay-API] Step 9b error:", e.message);
   }
 
-  // Parse charge response for GoPay payment URL / actions
+  // Parse charge response
   let chargeData;
   try { chargeData = JSON.parse(chargeText); } catch(e) {}
   
   if (chargeData) {
     console.log("[GoPay-API] Step 9 charge keys:", Object.keys(chargeData).join(", "));
     
-    // Look for redirect/action URLs
-    const actionUrl = chargeData.redirect_url 
-      || chargeData.actions?.find(a => a.name === "generate-qr-code" || a.name === "deeplink-redirect")?.url
-      || chargeData.gopay_callback_url;
-    
-    if (actionUrl) {
-      console.log("[GoPay-API] Step 10: GoPay action URL:", actionUrl);
+    // ── Step 10: Handle gopay_verification_link_url (tokenized payment) ──
+    const verificationUrl = chargeData.gopay_verification_link_url;
+    if (verificationUrl) {
+      console.log("[GoPay-API] Step 10: ✅ Got verification URL:", verificationUrl);
       
-      // Extract reference from action URL
-      const payRefMatch = actionUrl.match(/reference[=:]([a-f0-9-]{36})/i);
-      if (payRefMatch) {
-        console.log("[GoPay-API] Step 10: Payment reference:", payRefMatch[1]);
+      // Extract reference from URL (e.g. ?reference=UUID)
+      let paymentRef;
+      try {
+        const vUrl = new URL(verificationUrl);
+        paymentRef = vUrl.searchParams.get("reference");
+      } catch(e) {
+        // Try regex fallback
+        const m = verificationUrl.match(/reference[=:]([a-f0-9-]{36})/i);
+        paymentRef = m ? m[1] : null;
+      }
+      
+      if (paymentRef) {
+        console.log("[GoPay-API] Step 10: Payment reference:", paymentRef);
         
-        // Validate payment reference  
+        // Step 10a: Validate payment reference
+        console.log("[GoPay-API] Step 10a: Validating payment reference...");
         const payVal = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "User-Agent": UA,
-            "Origin": "https://merchants-gws-app.gopayapi.com",
-            "Referer": "https://merchants-gws-app.gopayapi.com/",
+            "Origin": "https://gwc.gopayapi.com",
+            "Referer": "https://gwc.gopayapi.com/",
           },
-          body: JSON.stringify({ reference_id: payRefMatch[1] }),
+          body: JSON.stringify({ reference_id: paymentRef }),
         });
         const payValData = await payVal.text();
-        console.log("[GoPay-API] Step 10 validate (status " + payVal.status + "):", payValData.substring(0, 500));
+        console.log("[GoPay-API] Step 10a validate (status " + payVal.status + "):", payValData.substring(0, 500));
+        
+        // Step 10b: Process payment (triggers PIN challenge)
+        console.log("[GoPay-API] Step 10b: Processing payment...");
+        const payProcess = await fetch("https://gwa.gopayapi.com/v1/payment/process", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": UA,
+            "Origin": "https://gwc.gopayapi.com",
+            "Referer": "https://gwc.gopayapi.com/",
+          },
+          body: JSON.stringify({ reference_id: paymentRef }),
+        });
+        const payProcessData = await payProcess.text();
+        console.log("[GoPay-API] Step 10b process (status " + payProcess.status + "):", payProcessData.substring(0, 500));
+        
+        // Parse challenge from process response
+        let processJson;
+        try { processJson = JSON.parse(payProcessData); } catch(e) {}
+        const payChallenge = processJson?.data?.challenge?.action?.value;
+        
+        if (payChallenge?.challenge_id && pin) {
+          console.log("[GoPay-API] Step 11: Payment PIN challenge found!");
+          console.log("[GoPay-API] Challenge ID:", payChallenge.challenge_id);
+          
+          // Step 11a: Get PIN page
+          const callbackUrl = `https://gwc.gopayapi.com/payment/provider-redirect?reference=${paymentRef}&action=payment-validate-pin`;
+          await fetch(
+            `https://customer.gopayapi.com/api/v2/challenges/${payChallenge.challenge_id}/pin-page/nb?redirect_url=${encodeURIComponent(callbackUrl)}`,
+            { headers: { "Accept": "application/json", "User-Agent": UA } }
+          );
+          
+          // Step 11b: Submit PIN
+          console.log("[GoPay-API] Step 11b: Submitting payment PIN...");
+          const payPinRes = await fetch("https://customer.gopayapi.com/api/v1/users/pin/tokens/nb", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "User-Agent": UA,
+            },
+            body: JSON.stringify({
+              challenge_id: payChallenge.challenge_id,
+              client_id: payChallenge.client_id,
+              pin: pin,
+            }),
+          });
+          const payPinData = await payPinRes.text();
+          console.log("[GoPay-API] Step 11b PIN response (status " + payPinRes.status + "):", payPinData.substring(0, 300));
+          
+          let payPinToken = "";
+          try { payPinToken = JSON.parse(payPinData)?.data?.token || ""; } catch(e) {}
+          
+          if (payPinToken) {
+            // Step 11c: Confirm payment with PIN token
+            console.log("[GoPay-API] Step 11c: Confirming payment...");
+            const confirmRes = await fetch("https://gwa.gopayapi.com/v1/payment/confirm", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "User-Agent": UA,
+                "Origin": "https://gwc.gopayapi.com",
+                "Referer": "https://gwc.gopayapi.com/",
+              },
+              body: JSON.stringify({ reference_id: paymentRef, token: payPinToken }),
+            });
+            const confirmData = await confirmRes.text();
+            console.log("[GoPay-API] Step 11c confirm (status " + confirmRes.status + "):", confirmData.substring(0, 500));
+          }
+        }
+        
+        // Step 12: Poll transaction status
+        console.log("[GoPay-API] Step 12: Polling transaction status...");
+        for (let i = 0; i < 10; i++) {
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            const statusRes = await fetch(`https://app.midtrans.com/snap/v1/transactions/${snapToken}/status`, {
+              headers: { "Authorization": MIDTRANS_AUTH, "User-Agent": UA },
+            });
+            const statusData = await statusRes.text();
+            console.log("[GoPay-API] Step 12 poll #" + (i+1) + " (status " + statusRes.status + "):", statusData.substring(0, 300));
+            
+            let statusJson;
+            try { statusJson = JSON.parse(statusData); } catch(e) {}
+            if (statusJson?.transaction_status === "settlement" || statusJson?.transaction_status === "capture") {
+              console.log("[GoPay-API] ✅ PAYMENT SETTLED!");
+              return { success: true, referenceId, paymentRef, message: "GoPay payment completed!" };
+            }
+          } catch(e) {
+            console.log("[GoPay-API] Step 12 poll error:", e.message);
+          }
+        }
+        
+        return { success: true, referenceId, paymentRef, message: "GoPay linked + payment initiated via tokenization" };
       }
     }
+    
+    // Fallback: no verification URL (regular GoPay deeplink)
+    console.log("[GoPay-API] ⚠️ No gopay_verification_link_url — regular GoPay payment");
+    const actionUrl = chargeData.redirect_url 
+      || chargeData.actions?.find(a => a.name === "generate-qr-code" || a.name === "deeplink-redirect")?.url
+      || chargeData.gopay_callback_url;
+    if (actionUrl) console.log("[GoPay-API] Deeplink URL:", actionUrl);
   }
 
   return { success: true, referenceId, message: "GoPay linked + charge initiated!" };
@@ -606,10 +857,86 @@ async function continueWithOTP(referenceId, otp, pin, snapToken) {
           "Authorization": MIDTRANS_AUTH,
           "User-Agent": UA,
         },
-        body: JSON.stringify({ payment_type: "gopay" }),
+        body: JSON.stringify({ payment_type: "gopay", gopay: { tokenization: true } }),
       });
       const chargeText = await chargeRes.text();
-      console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeText.substring(0, 500));
+      console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeText.substring(0, 800));
+
+      // Check for gopay_verification_link_url
+      let chargeJson;
+      try { chargeJson = JSON.parse(chargeText); } catch(e) {}
+      const verificationUrl = chargeJson?.gopay_verification_link_url;
+      if (verificationUrl) {
+        console.log("[GoPay-API] Step 10: ✅ Got verification URL:", verificationUrl);
+        let paymentRef;
+        try {
+          paymentRef = new URL(verificationUrl).searchParams.get("reference");
+        } catch(e) {
+          const m = verificationUrl.match(/reference[=:]([a-f0-9-]{36})/i);
+          paymentRef = m ? m[1] : null;
+        }
+        if (paymentRef) {
+          console.log("[GoPay-API] Step 10: Payment reference:", paymentRef);
+          
+          // Validate → Process → PIN → Confirm
+          const payVal = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "User-Agent": UA, "Origin": "https://gwc.gopayapi.com" },
+            body: JSON.stringify({ reference_id: paymentRef }),
+          });
+          console.log("[GoPay-API] Step 10a validate:", (await payVal.text()).substring(0, 300));
+          
+          const payProc = await fetch("https://gwa.gopayapi.com/v1/payment/process", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "User-Agent": UA, "Origin": "https://gwc.gopayapi.com" },
+            body: JSON.stringify({ reference_id: paymentRef }),
+          });
+          const procText = await payProc.text();
+          console.log("[GoPay-API] Step 10b process:", procText.substring(0, 500));
+          
+          let procJson;
+          try { procJson = JSON.parse(procText); } catch(e) {}
+          const payChallenge = procJson?.data?.challenge?.action?.value;
+          
+          if (payChallenge?.challenge_id && pin) {
+            const cbUrl = `https://gwc.gopayapi.com/payment/provider-redirect?reference=${paymentRef}&action=payment-validate-pin`;
+            await fetch(`https://customer.gopayapi.com/api/v2/challenges/${payChallenge.challenge_id}/pin-page/nb?redirect_url=${encodeURIComponent(cbUrl)}`,
+              { headers: { "Accept": "application/json", "User-Agent": UA } });
+            
+            const pinRes = await fetch("https://customer.gopayapi.com/api/v1/users/pin/tokens/nb", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "User-Agent": UA },
+              body: JSON.stringify({ challenge_id: payChallenge.challenge_id, client_id: payChallenge.client_id, pin }),
+            });
+            const pinData = await pinRes.text();
+            console.log("[GoPay-API] Step 11 PIN:", pinData.substring(0, 200));
+            
+            let pToken = "";
+            try { pToken = JSON.parse(pinData)?.data?.token || ""; } catch(e) {}
+            if (pToken) {
+              const conf = await fetch("https://gwa.gopayapi.com/v1/payment/confirm", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "User-Agent": UA, "Origin": "https://gwc.gopayapi.com" },
+                body: JSON.stringify({ reference_id: paymentRef, token: pToken }),
+              });
+              console.log("[GoPay-API] Step 12 confirm:", (await conf.text()).substring(0, 300));
+            }
+          }
+          
+          // Poll status
+          for (let i = 0; i < 8; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const st = await fetch(`https://app.midtrans.com/snap/v1/transactions/${snapToken}/status`,
+              { headers: { "Authorization": MIDTRANS_AUTH, "User-Agent": UA } });
+            const stText = await st.text();
+            console.log("[GoPay-API] Poll #" + (i+1) + ":", stText.substring(0, 200));
+            let stJson; try { stJson = JSON.parse(stText); } catch(e) {}
+            if (stJson?.transaction_status === "settlement" || stJson?.transaction_status === "capture") {
+              return { success: true, referenceId, paymentRef, message: "Payment settled!" };
+            }
+          }
+        }
+      }
     } catch(e) { console.log("[GoPay-API] Step 9b error:", e.message); }
   } else {
     console.log("[GoPay-API] ⚠️  No snapToken — cannot charge!");
