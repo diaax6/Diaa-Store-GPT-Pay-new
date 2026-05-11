@@ -381,8 +381,64 @@ async function continueWithOTP(referenceId, otpCode, pin) {
     }
   }
 
-  console.log("[GoPay-API] ✅ LINKING COMPLETE!");
-  return { success: true, referenceId, message: "GoPay linked!" };
+  console.log("[GoPay-API] ✅ LINKING COMPLETE! Starting PAYMENT...");
+
+  // ── Step 9: Charge via Midtrans Snap ───────────────────────────────
+  console.log("[GoPay-API] Step 9: Charging via Midtrans...");
+  
+  // Try charge endpoint
+  const chargeRes = curlPost(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/pay`, {
+    "Content-Type": "application/json",
+    "Authorization": MIDTRANS_AUTH,
+  }, { payment_type: "gopay" });
+  console.log("[GoPay-API] Step 9 /pay (status " + chargeRes.status + "):", chargeRes.text.substring(0, 500));
+
+  // If /pay doesn't work, try /charge
+  if (chargeRes.status >= 400 || !chargeRes.text) {
+    const charge2 = curlPost(`https://app.midtrans.com/snap/v3/transactions/${snapToken}/charge`, {
+      "Content-Type": "application/json",
+      "Authorization": MIDTRANS_AUTH,
+    }, { payment_type: "gopay" });
+    console.log("[GoPay-API] Step 9 /charge (status " + charge2.status + "):", charge2.text.substring(0, 500));
+  }
+
+  // Try the v4 endpoint too
+  const charge3 = curlPost(`https://app.midtrans.com/snap/v4/redirection/${snapToken}/pay`, {
+    "Content-Type": "application/json",
+    "Authorization": MIDTRANS_AUTH,
+  }, { payment_type: "gopay" });
+  console.log("[GoPay-API] Step 9 v4/pay (status " + charge3.status + "):", charge3.text.substring(0, 500));
+
+  // Check if any response has a GoPay payment URL
+  const allResponses = [chargeRes.text, charge3.text].join(" ");
+  const gopayUrlMatch = allResponses.match(/(https:\/\/[^\s"]*gopay[^\s"]*reference[^\s"]*)/i) 
+    || allResponses.match(/(https:\/\/[^\s"]*gwc\.gopayapi[^\s"]*)/i)
+    || allResponses.match(/(https:\/\/[^\s"]*merchants-gws-app[^\s"]*)/i);
+  
+  if (gopayUrlMatch) {
+    console.log("[GoPay-API] Step 10: Found GoPay payment URL:", gopayUrlMatch[1]);
+    // Extract payment reference from URL
+    const payRefMatch = gopayUrlMatch[1].match(/reference[=:]([a-f0-9-]{36})/i);
+    if (payRefMatch) {
+      console.log("[GoPay-API] Step 10: Payment reference:", payRefMatch[1]);
+      
+      // Validate payment reference
+      const payVal = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": UA,
+          "Origin": "https://merchants-gws-app.gopayapi.com",
+          "Referer": "https://merchants-gws-app.gopayapi.com/",
+        },
+        body: JSON.stringify({ reference_id: payRefMatch[1] }),
+      });
+      const payValData = await payVal.text();
+      console.log("[GoPay-API] Step 10 validate (status " + payVal.status + "):", payValData.substring(0, 500));
+    }
+  }
+
+  return { success: true, referenceId, message: "GoPay linked + charge initiated!" };
 }
 
 module.exports = { automateGoPay, continueWithOTP };
