@@ -221,37 +221,70 @@ async function continueWithOTP(referenceId, otpCode, pin) {
     console.log("[GoPay-API] Client ID:", challenge.client_id);
   }
 
-  // Step 6: Enter PIN
+  // Step 6: Enter PIN via GoPay PIN Challenge API
   if (nextAction && nextAction.includes("pin") && pin) {
-    console.log("[GoPay-API] Step 6: Entering PIN...");
-    
-    // Try with challenge endpoint first
-    const pinBody = { reference_id: referenceId, pin: pin };
-    if (challenge?.challenge_id) {
-      pinBody.challenge_id = challenge.challenge_id;
+    console.log("[GoPay-API] Step 6: Entering PIN via challenge API...");
+
+    if (!challenge?.challenge_id || !challenge?.client_id) {
+      return { success: false, error: "No challenge_id/client_id in OTP response" };
     }
-    console.log("[GoPay-API] Step 6 body:", JSON.stringify(pinBody));
-    
-    const pinRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+
+    // Step 6a: Get PIN page (initializes challenge session)
+    const callbackUrl = challenge.redirect_uri
+      ? new URL(challenge.redirect_uri).searchParams.get("callbackUrl") || ""
+      : `https://merchants-gws-app.gopayapi.com/payment/provider-redirect?reference=${referenceId}&action=linking-validate-pin`;
+
+    console.log("[GoPay-API] Step 6a: Getting PIN page...");
+    const pinPageRes = await fetch(
+      `https://customer.gopayapi.com/api/v2/challenges/${challenge.challenge_id}/pin-page/nb?redirect_url=${encodeURIComponent(callbackUrl)}`,
+      {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": UA,
+        },
+      }
+    );
+    const pinPageData = await pinPageRes.text();
+    console.log("[GoPay-API] Step 6a response (status " + pinPageRes.status + "):", pinPageData.substring(0, 300));
+
+    // Step 6b: Submit PIN token
+    console.log("[GoPay-API] Step 6b: Submitting PIN...");
+    const pinTokenRes = await fetch("https://customer.gopayapi.com/api/v1/users/pin/tokens/nb", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "application/json",
         "User-Agent": UA,
-        "Origin": "https://merchants-gws-app.gopayapi.com",
-        "Referer": "https://merchants-gws-app.gopayapi.com/",
-        "x-user-locale": "en-US",
       },
-      body: JSON.stringify(pinBody),
+      body: JSON.stringify({
+        challenge_id: challenge.challenge_id,
+        client_id: challenge.client_id,
+        pin: pin,
+      }),
     });
 
-    const pinData = await pinRes.json();
-    console.log("[GoPay-API] Step 6 response:", JSON.stringify(pinData).substring(0, 500));
+    const pinTokenData = await pinTokenRes.text();
+    console.log("[GoPay-API] Step 6b response (status " + pinTokenRes.status + "):", pinTokenData.substring(0, 500));
 
-    if (!pinData.success) {
-      return { success: false, error: "PIN failed: " + JSON.stringify(pinData) };
+    if (pinTokenRes.status >= 400) {
+      // Fallback: try the old validate-pin endpoint
+      console.log("[GoPay-API] Step 6c: Trying fallback validate-pin...");
+      const fallbackRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json, text/plain, */*",
+          "User-Agent": UA,
+          "Origin": "https://merchants-gws-app.gopayapi.com",
+          "Referer": "https://merchants-gws-app.gopayapi.com/",
+        },
+        body: JSON.stringify({ reference_id: referenceId, pin: pin, challenge_id: challenge.challenge_id }),
+      });
+      const fallbackData = await fallbackRes.text();
+      console.log("[GoPay-API] Step 6c fallback response (status " + fallbackRes.status + "):", fallbackData.substring(0, 500));
     }
-    console.log("[GoPay-API] Step 6: ✅ PIN accepted!");
+
+    console.log("[GoPay-API] Step 6: PIN submitted!");
   }
 
   console.log("[GoPay-API] ✅ COMPLETE!");
