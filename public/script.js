@@ -626,6 +626,8 @@
         resultDiv.style.color = "#10b981";
         resultDiv.innerHTML = "✅ GoPay activated successfully!";
       } else if (data.waitingForOTP) {
+        // Save snapToken for later charge step
+        window._gopaySnapToken = data.snapToken || "";
         // Show manual OTP input
         resultDiv.style.background = "rgba(245,158,11,0.15)";
         resultDiv.style.color = "#f59e0b";
@@ -672,7 +674,7 @@
       const res = await fetch("/api/gopay/submit-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ referenceId, otp }),
+        body: JSON.stringify({ referenceId, otp, snapToken: window._gopaySnapToken }),
       });
       const data = await res.json();
 

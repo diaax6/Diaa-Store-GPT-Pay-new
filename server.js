@@ -649,7 +649,7 @@ app.post("/api/gopay/test", requireAuth, async (req, res) => {
 
 // Manual OTP submission — continue after auto-detect fails
 app.post("/api/gopay/submit-otp", requireAuth, async (req, res) => {
-  const { referenceId, otp } = req.body;
+  const { referenceId, otp, snapToken } = req.body;
   if (!referenceId || !otp) return res.status(400).json({ error: "referenceId and otp required" });
 
   const cfg = loadConfig();
@@ -658,7 +658,7 @@ app.post("/api/gopay/submit-otp", requireAuth, async (req, res) => {
   const pin = accounts[activeIdx]?.pin || cfg.gopayPin;
 
   try {
-    const result = await continueWithOTP(referenceId, otp, pin);
+    const result = await continueWithOTP(referenceId, otp, pin, snapToken);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

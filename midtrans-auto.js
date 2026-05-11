@@ -126,6 +126,7 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
     success: false,
     waitingForOTP: true,
     referenceId,
+    snapToken,
     message: "OTP sent to WhatsApp — enter it manually",
     step: 4,
   };
@@ -451,6 +452,149 @@ async function continueWithOTP(referenceId, otpCode, pin) {
         console.log("[GoPay-API] Step 10 validate (status " + payVal.status + "):", payValData.substring(0, 500));
       }
     }
+  }
+
+  return { success: true, referenceId, message: "GoPay linked + charge initiated!" };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// continueWithOTP — called by server.js after manual OTP input
+// ──────────────────────────────────────────────────────────────────────
+
+async function continueWithOTP(referenceId, otp, pin, snapToken) {
+  console.log("\n[GoPay-API] ═══ continueWithOTP ═══");
+  console.log("[GoPay-API] referenceId:", referenceId);
+  console.log("[GoPay-API] snapToken:", snapToken);
+
+  // ── Step 5: Validate OTP ─────────────────────────────────────────
+  console.log("[GoPay-API] Step 5: Validating OTP...");
+  const otpRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-otp", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": UA,
+      "Origin": "https://merchants-gws-app.gopayapi.com",
+      "Referer": "https://merchants-gws-app.gopayapi.com/",
+    },
+    body: JSON.stringify({ reference_id: referenceId, otp }),
+  });
+
+  const otpData = await otpRes.json();
+  console.log("[GoPay-API] Step 5 response:", JSON.stringify(otpData).substring(0, 300));
+
+  if (!otpData.success) {
+    return { success: false, error: "OTP validation failed: " + JSON.stringify(otpData), step: 5 };
+  }
+
+  const nextAction = otpData.data?.next_action;
+  console.log("[GoPay-API] Step 5: ✅ OTP validated — next:", nextAction);
+
+  // ── Step 6: Enter PIN via challenge API ──────────────────────────
+  if (nextAction === "linking-validate-pin" || nextAction === "linking-enter-pin") {
+    const challengeId = otpData.data?.action_data?.redirect_uri?.match(/challengeId=([^&]+)/)?.[1];
+    const clientId = otpData.data?.action_data?.redirect_uri?.match(/clientId=([^&]+)/)?.[1];
+    const callbackUrl = decodeURIComponent(otpData.data?.action_data?.redirect_uri?.match(/callbackUrl=([^&]+)/)?.[1] || "");
+
+    console.log("[GoPay-API] Challenge ID:", challengeId);
+    console.log("[GoPay-API] Client ID:", clientId);
+
+    if (challengeId && clientId) {
+      // Step 6a: Get PIN page
+      console.log("[GoPay-API] Step 6a: Getting PIN page...");
+      const pinPageRes = await fetch(`https://customer.gopayapi.com/api/v1/users/pin/challenges/${challengeId}?client_id=${clientId}`, {
+        headers: { "User-Agent": UA },
+      });
+      const pinPageData = await pinPageRes.text();
+      console.log("[GoPay-API] Step 6a response (status " + pinPageRes.status + "):", pinPageData.substring(0, 200));
+
+      // Step 6b: Submit PIN
+      console.log("[GoPay-API] Step 6b: Submitting PIN...");
+      const pinSubmitRes = await fetch("https://customer.gopayapi.com/api/v1/users/pin/tokens/nb", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": UA,
+        },
+        body: JSON.stringify({
+          challenge_id: challengeId,
+          client_id: clientId,
+          pin_value: pin,
+        }),
+      });
+      const pinTokenData = await pinSubmitRes.text();
+      console.log("[GoPay-API] Step 6b response (status " + pinSubmitRes.status + "):", pinTokenData.substring(0, 200));
+
+      let pinToken = "";
+      try {
+        const parsed = JSON.parse(pinTokenData);
+        pinToken = parsed.data?.token || "";
+      } catch(e) {}
+
+      console.log("[GoPay-API] Step 6: PIN submitted!");
+
+      if (pinToken) {
+        // Step 7: Tell GoPay that PIN was verified
+        console.log("[GoPay-API] Step 7: Sending token to GoPay linking API...");
+        const vp = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": UA,
+            "Origin": "https://merchants-gws-app.gopayapi.com",
+            "Referer": "https://merchants-gws-app.gopayapi.com/",
+          },
+          body: JSON.stringify({ reference_id: referenceId, token: pinToken }),
+        });
+        const vpData = await vp.text();
+        console.log("[GoPay-API] Step 7 (status " + vp.status + "):", vpData.substring(0, 500));
+
+        let vpJson;
+        try { vpJson = JSON.parse(vpData); } catch(e) {}
+
+        // Step 8: Call Midtrans redirect_url
+        const redirectUrl = vpJson?.data?.redirect_url;
+        if (redirectUrl) {
+          console.log("[GoPay-API] Step 8: Calling Midtrans callback:", redirectUrl);
+          const midCb = await fetch(redirectUrl, {
+            headers: { "User-Agent": UA },
+            redirect: "follow",
+          });
+          const midCbBody = await midCb.text();
+          console.log("[GoPay-API] Step 8 (status " + midCb.status + ") body:", midCbBody.substring(0, 200));
+        }
+      }
+    }
+  }
+
+  console.log("[GoPay-API] ✅ LINKING COMPLETE! Starting PAYMENT...");
+
+  // ── Step 9: Charge via Midtrans ────────────────────────────────
+  if (snapToken) {
+    console.log("[GoPay-API] Step 9: Charging via Midtrans...");
+    
+    try {
+      const gopayInq = await fetch(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/gopay`, {
+        headers: { "Authorization": MIDTRANS_AUTH, "User-Agent": UA },
+      });
+      const gopayData = await gopayInq.text();
+      console.log("[GoPay-API] Step 9a inquiry (status " + gopayInq.status + "):", gopayData.substring(0, 300));
+    } catch(e) { console.log("[GoPay-API] Step 9a error:", e.message); }
+
+    try {
+      const chargeRes = await fetch(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": MIDTRANS_AUTH,
+          "User-Agent": UA,
+        },
+        body: JSON.stringify({ payment_type: "gopay" }),
+      });
+      const chargeText = await chargeRes.text();
+      console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeText.substring(0, 500));
+    } catch(e) { console.log("[GoPay-API] Step 9b error:", e.message); }
+  } else {
+    console.log("[GoPay-API] ⚠️  No snapToken — cannot charge!");
   }
 
   return { success: true, referenceId, message: "GoPay linked + charge initiated!" };
