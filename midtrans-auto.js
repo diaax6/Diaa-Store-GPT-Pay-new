@@ -293,46 +293,41 @@ async function continueWithOTP(referenceId, otpCode, pin) {
       pinToken = parsed.data?.token || "";
     } catch(e) {}
 
-    if (pinToken && callbackUrl) {
-      console.log("[GoPay-API] Step 7: Calling callback (no redirect follow)...");
-      const cbUrl = callbackUrl + (callbackUrl.includes("?") ? "&" : "?") + "pin_token=" + pinToken;
-      
-      // Follow redirects manually to capture payment reference
-      let currentUrl = cbUrl;
-      let paymentRef = null;
-      for (let i = 0; i < 5; i++) {
-        const res = await fetch(currentUrl, {
-          method: "GET",
-          headers: { "User-Agent": UA, "Accept": "application/json, text/html, */*" },
-          redirect: "manual",
+    if (pinToken) {
+      // Step 7: Tell GoPay server that PIN was verified (using pin_token)
+      console.log("[GoPay-API] Step 7: Sending pin_token to GoPay linking API...");
+      const validatePinRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": UA,
+          "Origin": "https://merchants-gws-app.gopayapi.com",
+          "Referer": "https://merchants-gws-app.gopayapi.com/",
+        },
+        body: JSON.stringify({ reference_id: referenceId, pin_token: pinToken }),
+      });
+      const vpData = await validatePinRes.text();
+      console.log("[GoPay-API] Step 7 validate-pin (status " + validatePinRes.status + "):", vpData.substring(0, 500));
+
+      // Also try with "token" field name
+      if (validatePinRes.status >= 400) {
+        console.log("[GoPay-API] Step 7b: Trying with 'token' field...");
+        const vp2Res = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "User-Agent": UA,
+            "Origin": "https://merchants-gws-app.gopayapi.com",
+            "Referer": "https://merchants-gws-app.gopayapi.com/",
+          },
+          body: JSON.stringify({ reference_id: referenceId, token: pinToken }),
         });
-        const location = res.headers.get("location");
-        console.log(`[GoPay-API] Step 7 redirect ${i} (status ${res.status}): ${location || "(no redirect)"}`);
-        
-        // Check if redirect URL contains a payment reference
-        if (location) {
-          const refMatch = location.match(/reference[=:]([a-f0-9-]+)/i);
-          if (refMatch) {
-            paymentRef = refMatch[1];
-            console.log("[GoPay-API] Step 7: Found payment reference:", paymentRef);
-          }
-          currentUrl = location.startsWith("http") ? location : new URL(location, currentUrl).href;
-        } else {
-          // No more redirects — read the final response
-          const body = await res.text();
-          console.log("[GoPay-API] Step 7 final body:", body.substring(0, 300));
-          
-          // Try to extract reference from response body
-          const bodyRef = body.match(/reference[=:]([a-f0-9-]+)/i);
-          if (bodyRef) paymentRef = bodyRef[1];
-          break;
-        }
+        const vp2Data = await vp2Res.text();
+        console.log("[GoPay-API] Step 7b (status " + vp2Res.status + "):", vp2Data.substring(0, 500));
       }
 
-      // Step 8: Try payment flow with SAME reference (after linking completes, reference transitions to payment state)
+      // Step 8: Check payment state
       console.log("[GoPay-API] Step 8: Checking payment state...");
-      
-      // Try payment validate-reference
       const payValRes = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
         method: "POST",
         headers: {
@@ -346,40 +341,19 @@ async function continueWithOTP(referenceId, otpCode, pin) {
       const payValData = await payValRes.text();
       console.log("[GoPay-API] Step 8 payment validate (status " + payValRes.status + "):", payValData.substring(0, 500));
 
-      let payValJson;
-      try { payValJson = JSON.parse(payValData); } catch(e) {}
-
-      if (payValJson?.success) {
-        const payNextAction = payValJson.data?.next_action;
-        console.log("[GoPay-API] Step 8: Payment next_action:", payNextAction);
-
-        if (payNextAction === "payment-user-consent" || payNextAction === "payment-confirm") {
-          // Step 8b: Payment consent
-          console.log("[GoPay-API] Step 8b: Payment consent...");
-          const payConsentRes = await fetch("https://gwa.gopayapi.com/v1/payment/user-consent", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "User-Agent": UA,
-              "Origin": "https://merchants-gws-app.gopayapi.com",
-              "Referer": "https://merchants-gws-app.gopayapi.com/",
-            },
-            body: JSON.stringify({ reference_id: referenceId }),
-          });
-          const payConsentData = await payConsentRes.text();
-          console.log("[GoPay-API] Step 8b consent (status " + payConsentRes.status + "):", payConsentData.substring(0, 500));
-
-          // Return for manual OTP (payment OTP)
-          return {
-            success: false,
-            waitingForOTP: true,
-            referenceId: referenceId,
-            isPayment: true,
-            message: "Linking complete! Payment OTP sent — enter it",
-            step: 8,
-          };
-        }
-      }
+      // Also try linking validate-reference to see current state
+      const linkState = await fetch("https://gwa.gopayapi.com/v1/linking/validate-reference", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": UA,
+          "Origin": "https://merchants-gws-app.gopayapi.com",
+          "Referer": "https://merchants-gws-app.gopayapi.com/",
+        },
+        body: JSON.stringify({ reference_id: referenceId }),
+      });
+      const linkStateData = await linkState.text();
+      console.log("[GoPay-API] Step 8 linking state (status " + linkState.status + "):", linkStateData.substring(0, 500));
     }
   }
 
