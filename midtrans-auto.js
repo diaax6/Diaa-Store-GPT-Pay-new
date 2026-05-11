@@ -329,33 +329,56 @@ async function continueWithOTP(referenceId, otpCode, pin) {
         }
       }
 
-      // Step 8: If we found a payment reference, run the payment flow
-      if (paymentRef && paymentRef !== referenceId) {
-        console.log("[GoPay-API] Step 8: Starting PAYMENT flow with ref:", paymentRef);
-        
-        // 8a: Validate payment reference
-        const valRes = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": UA,
-            "Origin": "https://merchants-gws-app.gopayapi.com",
-            "Referer": "https://merchants-gws-app.gopayapi.com/",
-          },
-          body: JSON.stringify({ reference_id: paymentRef }),
-        });
-        const valData = await valRes.text();
-        console.log("[GoPay-API] Step 8a validate (status " + valRes.status + "):", valData.substring(0, 500));
+      // Step 8: Try payment flow with SAME reference (after linking completes, reference transitions to payment state)
+      console.log("[GoPay-API] Step 8: Checking payment state...");
+      
+      // Try payment validate-reference
+      const payValRes = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": UA,
+          "Origin": "https://merchants-gws-app.gopayapi.com",
+          "Referer": "https://merchants-gws-app.gopayapi.com/",
+        },
+        body: JSON.stringify({ reference_id: referenceId }),
+      });
+      const payValData = await payValRes.text();
+      console.log("[GoPay-API] Step 8 payment validate (status " + payValRes.status + "):", payValData.substring(0, 500));
 
-        // Return for manual OTP again
-        return {
-          success: false,
-          waitingForOTP: true,
-          referenceId: paymentRef,
-          isPayment: true,
-          message: "Linking complete! Payment OTP sent — enter it manually",
-          step: 8,
-        };
+      let payValJson;
+      try { payValJson = JSON.parse(payValData); } catch(e) {}
+
+      if (payValJson?.success) {
+        const payNextAction = payValJson.data?.next_action;
+        console.log("[GoPay-API] Step 8: Payment next_action:", payNextAction);
+
+        if (payNextAction === "payment-user-consent" || payNextAction === "payment-confirm") {
+          // Step 8b: Payment consent
+          console.log("[GoPay-API] Step 8b: Payment consent...");
+          const payConsentRes = await fetch("https://gwa.gopayapi.com/v1/payment/user-consent", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "User-Agent": UA,
+              "Origin": "https://merchants-gws-app.gopayapi.com",
+              "Referer": "https://merchants-gws-app.gopayapi.com/",
+            },
+            body: JSON.stringify({ reference_id: referenceId }),
+          });
+          const payConsentData = await payConsentRes.text();
+          console.log("[GoPay-API] Step 8b consent (status " + payConsentRes.status + "):", payConsentData.substring(0, 500));
+
+          // Return for manual OTP (payment OTP)
+          return {
+            success: false,
+            waitingForOTP: true,
+            referenceId: referenceId,
+            isPayment: true,
+            message: "Linking complete! Payment OTP sent — enter it",
+            step: 8,
+          };
+        }
       }
     }
   }
