@@ -9,7 +9,7 @@ const { automateGoPay, continueWithOTP } = require("./midtrans-auto");
 const { automateGoPayBrowser } = require("./gopay-puppeteer");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3001;
 const CONFIG_PATH = path.join(__dirname, "config.json");
 const CURL_CHROME = "/usr/local/bin/curl_chrome116";
 
