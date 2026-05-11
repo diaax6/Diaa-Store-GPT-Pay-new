@@ -491,9 +491,12 @@ async function continueWithOTP(referenceId, otp, pin, snapToken) {
 
   // ── Step 6: Enter PIN via challenge API ──────────────────────────
   if (nextAction === "linking-validate-pin" || nextAction === "linking-enter-pin") {
-    const challengeId = otpData.data?.action_data?.redirect_uri?.match(/challengeId=([^&]+)/)?.[1];
-    const clientId = otpData.data?.action_data?.redirect_uri?.match(/clientId=([^&]+)/)?.[1];
-    const callbackUrl = decodeURIComponent(otpData.data?.action_data?.redirect_uri?.match(/callbackUrl=([^&]+)/)?.[1] || "");
+    // Extract from direct data OR from redirect_uri
+    const challengeValue = otpData.data?.challenge?.action?.value || {};
+    const redirectUri = challengeValue.redirect_uri || otpData.data?.action_data?.redirect_uri || "";
+    
+    const challengeId = challengeValue.challenge_id || redirectUri.match(/challengeId=([^&]+)/)?.[1];
+    const clientId = challengeValue.client_id || redirectUri.match(/clientId=([^&]+)/)?.[1];
 
     console.log("[GoPay-API] Challenge ID:", challengeId);
     console.log("[GoPay-API] Client ID:", clientId);
