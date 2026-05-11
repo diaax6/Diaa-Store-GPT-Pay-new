@@ -393,12 +393,12 @@ async function continueWithOTP(referenceId, otpCode, pin) {
   }, {});
   console.log("[GoPay-API] Step 9a GoPay inquiry (status " + gopayInq.status + "):", gopayInq.text.substring(0, 300));
 
-  // THE charge endpoint from Midtrans snap JS
-  const chargeRes = curlPost(`https://app.midtrans.com/v2/transactions/${snapToken}/charge`, {
+  // THE charge endpoint from Midtrans snap JS (relative to /snap/ base)
+  const chargeRes = curlPost(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
     "Content-Type": "application/json",
     "Authorization": MIDTRANS_AUTH,
   }, { payment_type: "gopay" });
-  console.log("[GoPay-API] Step 9b /v2/charge (status " + chargeRes.status + "):", chargeRes.text.substring(0, 500));
+  console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeRes.text.substring(0, 500));
 
   // Also try the snap-relative path
   if (chargeRes.status >= 400) {
