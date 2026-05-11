@@ -502,26 +502,36 @@ async function continueWithOTP(referenceId, otp, pin, snapToken) {
     console.log("[GoPay-API] Client ID:", clientId);
 
     if (challengeId && clientId) {
-      // Step 6a: Get PIN page
+      // Build callback URL from redirect_uri
+      const redirectUri = challengeValue.redirect_uri || "";
+      let callbackUrl = "";
+      try { callbackUrl = new URL(redirectUri).searchParams.get("callbackUrl") || ""; } catch(e) {}
+      if (!callbackUrl) callbackUrl = `https://merchants-gws-app.gopayapi.com/payment/provider-redirect?reference=${referenceId}&action=linking-validate-pin`;
+
+      // Step 6a: Get PIN page (uses v2 endpoint!)
       console.log("[GoPay-API] Step 6a: Getting PIN page...");
-      const pinPageRes = await fetch(`https://customer.gopayapi.com/api/v1/users/pin/challenges/${challengeId}?client_id=${clientId}`, {
-        headers: { "User-Agent": UA },
-      });
+      const pinPageRes = await fetch(
+        `https://customer.gopayapi.com/api/v2/challenges/${challengeId}/pin-page/nb?redirect_url=${encodeURIComponent(callbackUrl)}`,
+        {
+          headers: { "Accept": "application/json", "User-Agent": UA },
+        }
+      );
       const pinPageData = await pinPageRes.text();
       console.log("[GoPay-API] Step 6a response (status " + pinPageRes.status + "):", pinPageData.substring(0, 200));
 
-      // Step 6b: Submit PIN
+      // Step 6b: Submit PIN (field is 'pin' NOT 'pin_value')
       console.log("[GoPay-API] Step 6b: Submitting PIN...");
       const pinSubmitRes = await fetch("https://customer.gopayapi.com/api/v1/users/pin/tokens/nb", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/json",
           "User-Agent": UA,
         },
         body: JSON.stringify({
           challenge_id: challengeId,
           client_id: clientId,
-          pin_value: pin,
+          pin: pin,
         }),
       });
       const pinTokenData = await pinSubmitRes.text();
