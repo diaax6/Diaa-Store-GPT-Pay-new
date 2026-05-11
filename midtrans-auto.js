@@ -285,6 +285,49 @@ async function continueWithOTP(referenceId, otpCode, pin) {
     }
 
     console.log("[GoPay-API] Step 6: PIN submitted!");
+
+    // Step 7: Call callback URL with token to complete linking
+    let pinToken = "";
+    try {
+      const parsed = JSON.parse(pinTokenData);
+      pinToken = parsed.data?.token || "";
+    } catch(e) {}
+
+    if (pinToken && callbackUrl) {
+      console.log("[GoPay-API] Step 7: Calling callback to finalize linking...");
+      const cbUrl = callbackUrl + (callbackUrl.includes("?") ? "&" : "?") + "pin_token=" + pinToken;
+      const cbRes = await fetch(cbUrl, {
+        method: "GET",
+        headers: { "User-Agent": UA, "Accept": "application/json, text/html, */*" },
+        redirect: "follow",
+      });
+      const cbData = await cbRes.text();
+      console.log("[GoPay-API] Step 7 callback (status " + cbRes.status + "):", cbData.substring(0, 500));
+
+      // Check if callback returns payment authorization needed
+      try {
+        const cbJson = JSON.parse(cbData);
+        if (cbJson.data?.next_action && cbJson.data.next_action.includes("pay")) {
+          console.log("[GoPay-API] Step 8: Payment authorization needed — next:", cbJson.data.next_action);
+          // Authorize payment
+          const payRes = await fetch("https://gwa.gopayapi.com/v1/payment/authorize", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "User-Agent": UA,
+              "Origin": "https://merchants-gws-app.gopayapi.com",
+              "Referer": "https://merchants-gws-app.gopayapi.com/",
+            },
+            body: JSON.stringify({ reference_id: referenceId }),
+          });
+          const payData = await payRes.text();
+          console.log("[GoPay-API] Step 8 payment response (status " + payRes.status + "):", payData.substring(0, 500));
+        }
+      } catch(e) {
+        console.log("[GoPay-API] Step 7 callback was not JSON — likely redirect HTML");
+      }
+    }
   }
 
   console.log("[GoPay-API] ✅ COMPLETE!");
