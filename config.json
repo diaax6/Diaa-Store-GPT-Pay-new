@@ -1,7 +1,12 @@
 {
   "adminPassword": "diaa2026",
   "userPassword": "gptpay",
-  "globalProxy": "",
-  "checkoutProxy": "",
-  "addresses": []
+  "globalProxy": "http://06396179dae9c48c081b__cr.tr,jp:e4f2b32b4aacd0d7@gw.dataimpulse.com:823",
+  "checkoutProxy": "http://06396179dae9c48c081b__cr.tr,jp:e4f2b32b4aacd0d7@gw.dataimpulse.com:823",
+  "addresses": [],
+  "gopayAccounts": [
+    { "phone": "85704614829", "pin": "170702" },
+    { "phone": "895320598550", "pin": "170702" }
+  ],
+  "gopayActiveIndex": 0
 }
