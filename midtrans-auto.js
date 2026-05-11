@@ -302,9 +302,9 @@ async function continueWithOTP(referenceId, otpCode, pin) {
     } catch(e) {}
 
     if (pinToken) {
-      // Step 7: Tell GoPay server that PIN was verified (using pin_token)
-      console.log("[GoPay-API] Step 7: Sending pin_token to GoPay linking API...");
-      const validatePinRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
+      // Step 7: Tell GoPay that PIN was verified (field name = "token")
+      console.log("[GoPay-API] Step 7: Sending token to GoPay linking API...");
+      const vp = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -312,60 +312,73 @@ async function continueWithOTP(referenceId, otpCode, pin) {
           "Origin": "https://merchants-gws-app.gopayapi.com",
           "Referer": "https://merchants-gws-app.gopayapi.com/",
         },
-        body: JSON.stringify({ reference_id: referenceId, pin_token: pinToken }),
+        body: JSON.stringify({ reference_id: referenceId, token: pinToken }),
       });
-      const vpData = await validatePinRes.text();
-      console.log("[GoPay-API] Step 7 validate-pin (status " + validatePinRes.status + "):", vpData.substring(0, 500));
+      const vpData = await vp.text();
+      console.log("[GoPay-API] Step 7 (status " + vp.status + "):", vpData.substring(0, 500));
 
-      // Also try with "token" field name
-      if (validatePinRes.status >= 400) {
-        console.log("[GoPay-API] Step 7b: Trying with 'token' field...");
-        const vp2Res = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": UA,
-            "Origin": "https://merchants-gws-app.gopayapi.com",
-            "Referer": "https://merchants-gws-app.gopayapi.com/",
-          },
-          body: JSON.stringify({ reference_id: referenceId, token: pinToken }),
+      let vpJson;
+      try { vpJson = JSON.parse(vpData); } catch(e) {}
+
+      // Step 8: Call Midtrans redirect_url to confirm linking
+      const redirectUrl = vpJson?.data?.redirect_url;
+      if (redirectUrl) {
+        console.log("[GoPay-API] Step 8: Calling Midtrans callback:", redirectUrl);
+        const midCb = await fetch(redirectUrl, {
+          headers: { "User-Agent": UA },
+          redirect: "manual",
         });
-        const vp2Data = await vp2Res.text();
-        console.log("[GoPay-API] Step 7b (status " + vp2Res.status + "):", vp2Data.substring(0, 500));
+        const midLoc = midCb.headers.get("location");
+        console.log("[GoPay-API] Step 8 Midtrans callback (status " + midCb.status + ") redirect:", midLoc || "(none)");
+
+        // Follow redirects to find payment reference
+        if (midLoc) {
+          console.log("[GoPay-API] Step 8b: Following Midtrans redirect...");
+          const mid2 = await fetch(midLoc, {
+            headers: { "User-Agent": UA },
+            redirect: "manual",
+          });
+          const mid2Loc = mid2.headers.get("location");
+          const mid2Body = await mid2.text();
+          console.log("[GoPay-API] Step 8b (status " + mid2.status + ") redirect:", mid2Loc || "(none)");
+          console.log("[GoPay-API] Step 8b body:", mid2Body.substring(0, 300));
+
+          // Look for payment reference in redirect URL or body
+          const allText = (midLoc || "") + (mid2Loc || "") + mid2Body;
+          const payRef = allText.match(/reference[=:]([a-f0-9-]{36})/i);
+          if (payRef && payRef[1] !== referenceId) {
+            console.log("[GoPay-API] Step 9: Found PAYMENT reference:", payRef[1]);
+            
+            // Validate payment reference
+            const payVal = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "User-Agent": UA,
+                "Origin": "https://merchants-gws-app.gopayapi.com",
+                "Referer": "https://merchants-gws-app.gopayapi.com/",
+              },
+              body: JSON.stringify({ reference_id: payRef[1] }),
+            });
+            const payValData = await payVal.text();
+            console.log("[GoPay-API] Step 9 payment validate (status " + payVal.status + "):", payValData.substring(0, 500));
+
+            // Return for manual OTP (payment)
+            return {
+              success: false,
+              waitingForOTP: true,
+              referenceId: payRef[1],
+              isPayment: true,
+              message: "Linking ✅! Now enter PAYMENT OTP",
+              step: 9,
+            };
+          }
+        }
       }
-
-      // Step 8: Check payment state
-      console.log("[GoPay-API] Step 8: Checking payment state...");
-      const payValRes = await fetch("https://gwa.gopayapi.com/v1/payment/validate-reference", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": UA,
-          "Origin": "https://merchants-gws-app.gopayapi.com",
-          "Referer": "https://merchants-gws-app.gopayapi.com/",
-        },
-        body: JSON.stringify({ reference_id: referenceId }),
-      });
-      const payValData = await payValRes.text();
-      console.log("[GoPay-API] Step 8 payment validate (status " + payValRes.status + "):", payValData.substring(0, 500));
-
-      // Also try linking validate-reference to see current state
-      const linkState = await fetch("https://gwa.gopayapi.com/v1/linking/validate-reference", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "User-Agent": UA,
-          "Origin": "https://merchants-gws-app.gopayapi.com",
-          "Referer": "https://merchants-gws-app.gopayapi.com/",
-        },
-        body: JSON.stringify({ reference_id: referenceId }),
-      });
-      const linkStateData = await linkState.text();
-      console.log("[GoPay-API] Step 8 linking state (status " + linkState.status + "):", linkStateData.substring(0, 500));
     }
   }
 
-  console.log("[GoPay-API] ✅ COMPLETE!");
+  console.log("[GoPay-API] ✅ LINKING COMPLETE!");
   return { success: true, referenceId, message: "GoPay linked!" };
 }
 
