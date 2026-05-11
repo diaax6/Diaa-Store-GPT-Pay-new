@@ -10,17 +10,21 @@ const MIDTRANS_AUTH = "Basic TWlkLWNsaWVudC0zVFg4blVhLWZfUmdOcmt5Og==";
 const UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
 
 // Use curl instead of Node's fetch — Node 18 fetch gets 429 from Midtrans
+const FALLBACK_PROXY = "http://06396179dae9c48c081b__cr.tr,jp:e4f2b32b4aacd0d7@gw.dataimpulse.com:823";
+
 function curlPost(url, headers, body) {
-  // Load proxy from config
-  let proxyArg = "";
+  // Load proxy from config, fallback to hardcoded
+  let proxy = FALLBACK_PROXY;
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf-8"));
-    const proxy = cfg.globalProxy || cfg.checkoutProxy || "";
-    if (proxy) proxyArg = ` -x "${proxy}"`;
+    proxy = cfg.globalProxy || cfg.checkoutProxy || FALLBACK_PROXY;
   } catch(e) {}
 
+  const proxyArg = proxy ? ` -x "${proxy}"` : "";
+  console.log("[curlPost] proxy:", proxy ? "YES (" + proxy.substring(0, 30) + "...)" : "NONE");
+
   const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
-  const cmd = `curl -s -w "\\n__HTTP__%{http_code}" -X POST "${url}" ${headerArgs}${proxyArg} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
+  const cmd = `curl -s -w "\\n__HTTP__%{http_code}" --connect-timeout 15 --max-time 25 -X POST "${url}" ${headerArgs}${proxyArg} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
   try {
     const raw = execSync(cmd, { timeout: 30000, encoding: "utf-8" });
     const parts = raw.split("\n__HTTP__");
@@ -28,6 +32,7 @@ function curlPost(url, headers, body) {
     const statusCode = parseInt(parts[1]) || 0;
     return { text: responseBody, status: statusCode, json: () => JSON.parse(responseBody) };
   } catch (e) {
+    console.log("[curlPost] ERROR:", e.message?.substring(0, 100));
     return { text: "", status: 0, json: () => ({}) };
   }
 }
