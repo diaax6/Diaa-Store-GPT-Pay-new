@@ -325,11 +325,14 @@ async function continueWithOTP(referenceId, otpCode, pin) {
       if (redirectUrl) {
         console.log("[GoPay-API] Step 8: Calling Midtrans callback:", redirectUrl);
         const midCb = await fetch(redirectUrl, {
-          headers: { "User-Agent": UA },
-          redirect: "manual",
+          headers: { "User-Agent": UA, "Accept": "application/json, text/html, */*" },
+          redirect: "follow",
         });
+        const midCbBody = await midCb.text();
         const midLoc = midCb.headers.get("location");
-        console.log("[GoPay-API] Step 8 Midtrans callback (status " + midCb.status + ") redirect:", midLoc || "(none)");
+        console.log("[GoPay-API] Step 8 (status " + midCb.status + ") redirect:", midLoc || "(none)");
+        console.log("[GoPay-API] Step 8 body:", midCbBody.substring(0, 500));
+        console.log("[GoPay-API] Step 8 final URL:", midCb.url);
 
         // Follow redirects to find payment reference
         if (midLoc) {
