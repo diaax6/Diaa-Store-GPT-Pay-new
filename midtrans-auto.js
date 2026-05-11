@@ -207,18 +207,31 @@ async function continueWithOTP(referenceId, otpCode, pin) {
   });
 
   const otpData = await otpRes.json();
-  console.log("[GoPay-API] Step 5 response:", JSON.stringify(otpData).substring(0, 300));
+  console.log("[GoPay-API] Step 5 FULL response:", JSON.stringify(otpData));
 
   if (!otpData.success) {
     return { success: false, error: "OTP validation failed: " + JSON.stringify(otpData) };
   }
 
   const nextAction = otpData.data?.next_action;
+  const challenge = otpData.data?.challenge?.action?.value;
   console.log("[GoPay-API] Step 5: ✅ OTP validated — next:", nextAction);
+  if (challenge) {
+    console.log("[GoPay-API] Challenge ID:", challenge.challenge_id);
+    console.log("[GoPay-API] Client ID:", challenge.client_id);
+  }
 
   // Step 6: Enter PIN
   if (nextAction && nextAction.includes("pin") && pin) {
     console.log("[GoPay-API] Step 6: Entering PIN...");
+    
+    // Try with challenge endpoint first
+    const pinBody = { reference_id: referenceId, pin: pin };
+    if (challenge?.challenge_id) {
+      pinBody.challenge_id = challenge.challenge_id;
+    }
+    console.log("[GoPay-API] Step 6 body:", JSON.stringify(pinBody));
+    
     const pinRes = await fetch("https://gwa.gopayapi.com/v1/linking/validate-pin", {
       method: "POST",
       headers: {
@@ -229,11 +242,11 @@ async function continueWithOTP(referenceId, otpCode, pin) {
         "Referer": "https://merchants-gws-app.gopayapi.com/",
         "x-user-locale": "en-US",
       },
-      body: JSON.stringify({ reference_id: referenceId, pin: pin }),
+      body: JSON.stringify(pinBody),
     });
 
     const pinData = await pinRes.json();
-    console.log("[GoPay-API] Step 6 response:", JSON.stringify(pinData).substring(0, 300));
+    console.log("[GoPay-API] Step 6 response:", JSON.stringify(pinData).substring(0, 500));
 
     if (!pinData.success) {
       return { success: false, error: "PIN failed: " + JSON.stringify(pinData) };
