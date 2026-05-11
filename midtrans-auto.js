@@ -386,32 +386,39 @@ async function continueWithOTP(referenceId, otpCode, pin) {
   // ── Step 9: Charge via Midtrans Snap ───────────────────────────────
   console.log("[GoPay-API] Step 9: Charging via Midtrans...");
   
-  // First check GoPay account status
-  const gopayInq = curlPost(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/gopay`, {
-    "Content-Type": "application/json",
-    "Authorization": MIDTRANS_AUTH,
-  }, {});
-  console.log("[GoPay-API] Step 9a GoPay inquiry (status " + gopayInq.status + "):", gopayInq.text.substring(0, 300));
+  // First check GoPay account status (using fetch, NOT curlPost — proxy hangs)
+  try {
+    const gopayInq = await fetch(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/gopay`, {
+      method: "GET",
+      headers: { "Authorization": MIDTRANS_AUTH, "User-Agent": UA },
+    });
+    const gopayData = await gopayInq.text();
+    console.log("[GoPay-API] Step 9a GoPay inquiry (status " + gopayInq.status + "):", gopayData.substring(0, 300));
+  } catch(e) {
+    console.log("[GoPay-API] Step 9a error:", e.message);
+  }
 
-  // THE charge endpoint from Midtrans snap JS (relative to /snap/ base)
-  const chargeRes = curlPost(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
-    "Content-Type": "application/json",
-    "Authorization": MIDTRANS_AUTH,
-  }, { payment_type: "gopay" });
-  console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeRes.text.substring(0, 500));
-
-  // Also try the snap-relative path
-  if (chargeRes.status >= 400) {
-    const charge2 = curlPost(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
-      "Content-Type": "application/json",
-      "Authorization": MIDTRANS_AUTH,
-    }, { payment_type: "gopay" });
-    console.log("[GoPay-API] Step 9c snap/v2/charge (status " + charge2.status + "):", charge2.text.substring(0, 500));
+  // THE charge endpoint from Midtrans snap JS
+  let chargeRes, chargeText = "";
+  try {
+    chargeRes = await fetch(`https://app.midtrans.com/snap/v2/transactions/${snapToken}/charge`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": MIDTRANS_AUTH,
+        "User-Agent": UA,
+      },
+      body: JSON.stringify({ payment_type: "gopay" }),
+    });
+    chargeText = await chargeRes.text();
+    console.log("[GoPay-API] Step 9b charge (status " + chargeRes.status + "):", chargeText.substring(0, 500));
+  } catch(e) {
+    console.log("[GoPay-API] Step 9b error:", e.message);
   }
 
   // Parse charge response for GoPay payment URL / actions
   let chargeData;
-  try { chargeData = JSON.parse(chargeRes.text); } catch(e) {}
+  try { chargeData = JSON.parse(chargeText); } catch(e) {}
   
   if (chargeData) {
     console.log("[GoPay-API] Step 9 charge keys:", Object.keys(chargeData).join(", "));
