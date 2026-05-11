@@ -112,23 +112,15 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
   }
   console.log("[GoPay-API] Step 3: ✅ OTP sent to WhatsApp!");
 
-  // ── Step 4: Wait for OTP on WhatsApp ─────────────────────────────
-  console.log("[GoPay-API] Step 4: Waiting for OTP on WhatsApp (60s)...");
-  let otpCode;
-  try {
-    const otpResult = await waitForOTP(60000);
-    otpCode = otpResult.code;
-    console.log("[GoPay-API] Step 4: ✅ OTP received:", otpCode);
-  } catch (e) {
-    console.log("[GoPay-API] Step 4: ⏳ OTP not auto-received — waiting for manual input");
-    return {
-      success: false,
-      waitingForOTP: true,
-      referenceId,
-      message: "OTP sent to WhatsApp — enter it manually",
-      step: 4,
-    };
-  }
+  // ── Step 4: Return immediately for manual OTP input ────────────────
+  console.log("[GoPay-API] Step 4: OTP sent — returning for manual input");
+  return {
+    success: false,
+    waitingForOTP: true,
+    referenceId,
+    message: "OTP sent to WhatsApp — enter it manually",
+    step: 4,
+  };
 
   // ── Step 5: Validate OTP ─────────────────────────────────────────
   console.log("[GoPay-API] Step 5: Validating OTP...");
