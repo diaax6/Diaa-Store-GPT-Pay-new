@@ -11,8 +11,16 @@ const UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, 
 
 // Use curl instead of Node's fetch — Node 18 fetch gets 429 from Midtrans
 function curlPost(url, headers, body) {
+  // Load proxy from config
+  let proxyArg = "";
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf-8"));
+    const proxy = cfg.globalProxy || cfg.checkoutProxy || "";
+    if (proxy) proxyArg = ` -x "${proxy}"`;
+  } catch(e) {}
+
   const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
-  const cmd = `curl -s -w "\\n__HTTP__%{http_code}" -X POST "${url}" ${headerArgs} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
+  const cmd = `curl -s -w "\\n__HTTP__%{http_code}" -X POST "${url}" ${headerArgs}${proxyArg} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
   try {
     const raw = execSync(cmd, { timeout: 30000, encoding: "utf-8" });
     const parts = raw.split("\n__HTTP__");
