@@ -4,9 +4,25 @@
 
 const fs = require("fs");
 const path = require("path");
+const { execSync } = require("child_process");
 
 const MIDTRANS_AUTH = "Basic TWlkLWNsaWVudC0zVFg4blVhLWZfUmdOcmt5Og==";
 const UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+// Use curl instead of Node's fetch — Node 18 fetch gets 429 from Midtrans
+function curlPost(url, headers, body) {
+  const headerArgs = Object.entries(headers).map(([k, v]) => `-H "${k}: ${v}"`).join(" ");
+  const cmd = `curl -s -w "\\n__HTTP__%{http_code}" -X POST "${url}" ${headerArgs} -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
+  try {
+    const raw = execSync(cmd, { timeout: 30000, encoding: "utf-8" });
+    const parts = raw.split("\n__HTTP__");
+    const responseBody = parts[0];
+    const statusCode = parseInt(parts[1]) || 0;
+    return { text: responseBody, status: statusCode, json: () => JSON.parse(responseBody) };
+  } catch (e) {
+    return { text: "", status: 0, json: () => ({}) };
+  }
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Full Direct API Automation — NO PUPPETEER
@@ -27,27 +43,18 @@ async function automateGoPay(midtransUrl, phoneNumber, pin, waitForOTP) {
 
   // ── Step 1: Midtrans Linking ─────────────────────────────────────
   console.log("[GoPay-API] Step 1: Midtrans linking...");
-  const linkRes = await fetch(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/linking`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": MIDTRANS_AUTH,
-      "Accept": "application/json",
-      "User-Agent": UA,
-      "Referer": `https://app.midtrans.com/snap/v4/redirection/${snapToken}`,
-      "x-source": "snap",
-      "x-source-version": "2.3.0",
-    },
-    body: JSON.stringify({ type: "gopay", country_code: "62", phone_number: phoneNumber }),
-  });
+  const linkRes = curlPost(`https://app.midtrans.com/snap/v3/accounts/${snapToken}/linking`, {
+    "Content-Type": "application/json",
+    "Authorization": MIDTRANS_AUTH,
+  }, { type: "gopay", country_code: "62", phone_number: phoneNumber });
+
+  console.log("[GoPay-API] Step 1 raw (status " + linkRes.status + "):", linkRes.text.substring(0, 300));
 
   let linkData;
   try {
-    const linkText = await linkRes.text();
-    console.log("[GoPay-API] Step 1 raw:", linkText.substring(0, 300));
-    linkData = JSON.parse(linkText);
+    linkData = JSON.parse(linkRes.text);
   } catch (e) {
-    return { success: false, error: "Step 1 response not JSON (status: " + linkRes.status + ")", step: 1 };
+    return { success: false, error: "Step 1 not JSON (status: " + linkRes.status + ")", step: 1 };
   }
   console.log("[GoPay-API] Step 1 response:", JSON.stringify(linkData).substring(0, 200));
 
