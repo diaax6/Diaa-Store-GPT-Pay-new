@@ -36,7 +36,11 @@ const fivesim = {
     return { balance: d.balance, email: d.email, provider: "5sim" };
   },
 
-  async buyNumber(product = "gopay", country = "indonesia", operator = "any") {
+  async buyNumber(product, country, operator) {
+    const cfg = getConfig();
+    product = product || cfg.smsProduct || "gopay";
+    country = country || cfg.smsCountry5sim || "indonesia";
+    operator = operator || cfg.smsOperator || "any";
     log(`[5sim] Buying ${product} number (${country}/${operator})...`);
     const res = await fetch(
       `${this.base}/user/buy/activation/${country}/${operator}/${product}`,
@@ -85,48 +89,71 @@ const fivesim = {
 };
 
 // ══════════════════════════════════════════════════════════════════════════
-// HERO-SMS.COM Provider (SMS-Activate Protocol)
+// HERO-SMS.COM Provider (SMS-Activate compatible API)
+// Base URL: https://hero-sms.com/api
+// Auth: apiKeyQuery — pass api_key as query parameter
 // ══════════════════════════════════════════════════════════════════════════
 
 const herosms = {
-  base: "https://hero-sms.com/stubs/handler_api.php",
+  base: "https://hero-sms.com/api",
 
   getKey() {
     const cfg = getConfig();
     return cfg.smsApiKeyHero || "";
   },
 
-  async request(params) {
-    const url = `${this.base}?api_key=${this.getKey()}&${new URLSearchParams(params).toString()}`;
+  async request(endpoint, params = {}) {
+    params.api_key = this.getKey();
+    const url = `${this.base}/${endpoint}?${new URLSearchParams(params).toString()}`;
+    log(`[hero-sms] → ${endpoint}`, JSON.stringify(params).substring(0, 100));
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`hero-sms error: ${res.status}`);
-    return await res.text();
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`hero-sms ${endpoint} error ${res.status}: ${errText}`);
+    }
+    const text = await res.text();
+    // Try to parse as JSON, fallback to text
+    try { return { json: JSON.parse(text), raw: text }; }
+    catch { return { json: null, raw: text }; }
   },
 
   async getBalance() {
-    const text = await this.request({ action: "getBalance" });
-    // Response: ACCESS_BALANCE:123.45
-    const m = text.match(/ACCESS_BALANCE:([\d.]+)/);
-    return { balance: m ? parseFloat(m[1]) : 0, provider: "hero-sms" };
+    const { json, raw } = await this.request("getBalance");
+    if (json && json.balance !== undefined) {
+      return { balance: parseFloat(json.balance), provider: "hero-sms" };
+    }
+    // Fallback: ACCESS_BALANCE:123.45
+    const m = raw.match(/ACCESS_BALANCE:([\d.]+)/);
+    return { balance: m ? parseFloat(m[1]) : 0, provider: "hero-sms", raw };
   },
 
-  async buyNumber(service = "go", country = "6") {
-    // service codes: "go" = Gojek/GoPay, country: "6" = Indonesia
+  async buyNumber(service, country) {
+    const cfg = getConfig();
+    service = service || cfg.smsService || "go";
+    country = country || cfg.smsCountry || "6";
     log(`[hero-sms] Buying number (service=${service}, country=${country})...`);
-    const text = await this.request({ action: "getNumber", service, country });
-    // Response: ACCESS_NUMBER:ID:NUMBER (e.g. ACCESS_NUMBER:123456:6281234567890)
-    const m = text.match(/ACCESS_NUMBER:(\d+):(\d+)/);
-    if (!m) throw new Error(`hero-sms buy failed: ${text}`);
-    const orderId = m[1];
-    const phone = "+" + m[2];
-    log(`[hero-sms] ✅ Got number: ${phone} (id: ${orderId})`);
-    return { orderId, phone, status: "PENDING" };
+    const { json, raw } = await this.request("getNumber", { service, country });
+    
+    // JSON response: { id: "123", phone: "62812..." }
+    if (json && json.id && json.phone) {
+      const phone = json.phone.startsWith("+") ? json.phone : "+" + json.phone;
+      log(`[hero-sms] ✅ Got number: ${phone} (id: ${json.id})`);
+      return { orderId: json.id, phone, status: "PENDING" };
+    }
+    // Text response: ACCESS_NUMBER:ID:NUMBER
+    const m = raw.match(/ACCESS_NUMBER:(\d+):(\d+)/);
+    if (m) {
+      const phone = "+" + m[2];
+      log(`[hero-sms] ✅ Got number: ${phone} (id: ${m[1]})`);
+      return { orderId: m[1], phone, status: "PENDING" };
+    }
+    throw new Error(`hero-sms buy failed: ${raw}`);
   },
 
   async markReady(orderId) {
-    const text = await this.request({ action: "setStatus", id: orderId, status: "1" });
-    log(`[hero-sms] Mark ready: ${text}`);
-    return text;
+    const { raw } = await this.request("setStatus", { id: orderId, status: "1" });
+    log(`[hero-sms] Mark ready: ${raw}`);
+    return raw;
   },
 
   async waitForSMS(orderId, timeoutMs = 120000) {
@@ -136,18 +163,29 @@ const herosms = {
 
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      const text = await this.request({ action: "getStatus", id: orderId });
-      // STATUS_OK:CODE or STATUS_WAIT_CODE
-      const m = text.match(/STATUS_OK:(.+)/);
+      const { json, raw } = await this.request("getStatus", { id: orderId });
+      
+      // JSON response: { status: "STATUS_OK", code: "1234" }
+      if (json && json.code) {
+        log(`[hero-sms] ✅ Got code: ${json.code}`);
+        return { text: raw, code: json.code, sender: "GoPay" };
+      }
+      if (json && json.status === "STATUS_CANCEL") {
+        throw new Error("hero-sms: activation cancelled");
+      }
+      
+      // Text response: STATUS_OK:CODE
+      const m = raw.match(/STATUS_OK:(.+)/);
       if (m) {
         const code = m[1].trim();
         log(`[hero-sms] ✅ Got code: ${code}`);
-        return { text: text, code, sender: "GoPay" };
+        return { text: raw, code, sender: "GoPay" };
       }
-      if (text.includes("STATUS_CANCEL")) {
+      if (raw.includes("STATUS_CANCEL")) {
         throw new Error("hero-sms: activation cancelled");
       }
-      log(`[hero-sms] Waiting... (${((Date.now() - start) / 1000).toFixed(0)}s) → ${text}`);
+      
+      log(`[hero-sms] Waiting... (${((Date.now() - start) / 1000).toFixed(0)}s) → ${raw.substring(0, 80)}`);
       await new Promise(r => setTimeout(r, 5000));
     }
     throw new Error(`hero-sms SMS timeout after ${timeoutMs / 1000}s`);
@@ -155,12 +193,12 @@ const herosms = {
 
   async finishOrder(orderId) {
     log(`[hero-sms] Finishing #${orderId}`);
-    await this.request({ action: "setStatus", id: orderId, status: "6" });
+    await this.request("setStatus", { id: orderId, status: "6" });
   },
 
   async cancelOrder(orderId) {
     log(`[hero-sms] Cancelling #${orderId}`);
-    await this.request({ action: "setStatus", id: orderId, status: "8" });
+    await this.request("setStatus", { id: orderId, status: "8" });
   },
 };
 

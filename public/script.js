@@ -192,6 +192,8 @@
       // Load countries data then addresses
       await loadCountriesData();
       await loadAddresses();
+      // Load SMS settings
+      await loadSmsSettings();
     } catch (e) {}
   }
 
@@ -240,6 +242,88 @@
       $("newUserPw").value = "";
       alert("✅ Passwords updated!");
     } catch (e) { alert("Error!"); }
+  };
+
+  // ══════════════════════════════════════════════════════════════
+  // SMS SETTINGS
+  // ══════════════════════════════════════════════════════════════
+  // Toggle provider fields
+  if ($("smsProviderSelect")) {
+    $("smsProviderSelect").addEventListener("change", function () {
+      const v = this.value;
+      $("heroSmsFields").style.display = (v === "" || v === "hero-sms") ? "" : "none";
+      $("fivesimFields").style.display = v === "5sim" ? "" : "none";
+    });
+  }
+
+  async function loadSmsSettings() {
+    try {
+      const res = await fetch("/api/admin/sms-settings");
+      const d = await res.json();
+      if ($("smsProviderSelect")) {
+        $("smsProviderSelect").value = d.smsProvider || "";
+        $("smsProviderSelect").dispatchEvent(new Event("change"));
+      }
+      if ($("smsServiceCode")) $("smsServiceCode").value = d.smsService || "go";
+      if ($("smsCountryCode")) $("smsCountryCode").value = d.smsCountry || "6";
+      if ($("smsProductCode")) $("smsProductCode").value = d.smsProduct || "gopay";
+      if ($("smsCountry5sim")) $("smsCountry5sim").value = d.smsCountry5sim || "indonesia";
+      if ($("smsOperator")) $("smsOperator").value = d.smsOperator || "any";
+      // Don't prefill API keys for security — only show masked
+      if (d.hasHeroKey && $("smsApiKeyHero")) $("smsApiKeyHero").placeholder = "Key set: " + d.smsApiKeyHero;
+      if (d.has5simKey && $("smsApiKey5sim")) $("smsApiKey5sim").placeholder = "Key set: " + d.smsApiKey5sim;
+    } catch (e) {}
+  }
+
+  window.saveSmsSettings = async function () {
+    const body = {
+      smsProvider: $("smsProviderSelect").value,
+      smsService: $("smsServiceCode").value.trim(),
+      smsCountry: $("smsCountryCode").value.trim(),
+      smsProduct: $("smsProductCode").value.trim(),
+      smsCountry5sim: $("smsCountry5sim").value.trim(),
+      smsOperator: $("smsOperator").value.trim(),
+    };
+    // Only send API keys if user typed a new one
+    const heroKey = $("smsApiKeyHero").value.trim();
+    const fiveKey = $("smsApiKey5sim").value.trim();
+    if (heroKey) body.smsApiKeyHero = heroKey;
+    if (fiveKey) body.smsApiKey5sim = fiveKey;
+
+    try {
+      const res = await fetch("/api/admin/sms-settings", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await res.json();
+      $("smsSettingsStatus").textContent = d.success ? "✅ SMS settings saved!" : "❌ Error";
+      $("smsSettingsStatus").style.color = d.success ? "var(--green)" : "var(--error)";
+      setTimeout(() => { $("smsSettingsStatus").textContent = ""; }, 3000);
+      // Clear typed keys
+      $("smsApiKeyHero").value = "";
+      $("smsApiKey5sim").value = "";
+      await loadSmsSettings();
+    } catch (e) {
+      $("smsSettingsStatus").textContent = "❌ " + e.message;
+      $("smsSettingsStatus").style.color = "var(--error)";
+    }
+  };
+
+  window.checkSmsBalance = async function () {
+    const info = $("smsBalanceInfo");
+    info.style.display = "";
+    info.textContent = "⏳ Checking balance...";
+    info.style.color = "var(--yellow, #f59e0b)";
+    try {
+      const res = await fetch("/api/sms/balance");
+      const d = await res.json();
+      if (d.error) throw new Error(d.error);
+      info.textContent = `💰 Balance: ${d.balance} (${d.provider})`;
+      info.style.color = "var(--green, #10b981)";
+    } catch (e) {
+      info.textContent = "❌ " + e.message;
+      info.style.color = "var(--error, #ef4444)";
+    }
   };
 
   // ══════════════════════════════════════════════════════════════

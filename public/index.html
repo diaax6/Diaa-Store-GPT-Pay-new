@@ -131,6 +131,42 @@
         </div>
       </div>
 
+      <!-- ═══ SMS Provider Settings ═══ -->
+      <div class="admin-row" style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border)">
+        <label class="config-label">📱 SMS Provider <span class="label-hint">(for GoPay OTP)</span></label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+          <select id="smsProviderSelect" class="proxy-input" style="flex:1;min-width:140px;padding:8px;">
+            <option value="">-- Select --</option>
+            <option value="hero-sms">Hero SMS</option>
+            <option value="5sim">5sim.net</option>
+          </select>
+          <button class="btn-copy" onclick="checkSmsBalance()" style="background:rgba(16,185,129,0.15);color:#10b981" title="Check Balance">
+            💰
+          </button>
+        </div>
+        <div id="smsBalanceInfo" style="font-size:12px;color:var(--green);margin-bottom:8px;display:none"></div>
+        
+        <div id="heroSmsFields">
+          <input type="text" class="proxy-input" id="smsApiKeyHero" placeholder="Hero SMS API Key" spellcheck="false" style="margin-bottom:6px;width:100%" />
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input type="text" class="proxy-input" id="smsServiceCode" placeholder="Service code (e.g. go)" style="flex:1" />
+            <input type="text" class="proxy-input" id="smsCountryCode" placeholder="Country (e.g. 6)" style="flex:1" />
+          </div>
+        </div>
+        <div id="fivesimFields" style="display:none">
+          <input type="text" class="proxy-input" id="smsApiKey5sim" placeholder="5sim API Key" spellcheck="false" style="margin-bottom:6px;width:100%" />
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <input type="text" class="proxy-input" id="smsProductCode" placeholder="Product (e.g. gopay)" style="flex:1" />
+            <input type="text" class="proxy-input" id="smsCountry5sim" placeholder="Country (e.g. indonesia)" style="flex:1" />
+            <input type="text" class="proxy-input" id="smsOperator" placeholder="Operator (any)" style="flex:1" />
+          </div>
+        </div>
+        <button class="btn-copy" onclick="saveSmsSettings()" style="background:var(--red-dim);color:var(--red);width:100%;padding:8px;border-radius:6px">
+          💾 Save SMS Settings
+        </button>
+        <div class="admin-status" id="smsSettingsStatus"></div>
+      </div>
+
       <!-- ═══ Address Management ═══ -->
       <div class="admin-row" style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border)">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">

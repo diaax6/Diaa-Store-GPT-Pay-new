@@ -169,6 +169,36 @@ app.post("/api/admin/passwords", requireAdmin, (req, res) => {
   return res.json({ success: true });
 });
 
+// ── SMS Provider Settings ────────────────────────────────────────────────
+app.get("/api/admin/sms-settings", requireAdmin, (req, res) => {
+  const cfg = loadConfig();
+  res.json({
+    smsProvider: cfg.smsProvider || "",
+    smsApiKeyHero: cfg.smsApiKeyHero ? "****" + cfg.smsApiKeyHero.slice(-6) : "",
+    smsApiKey5sim: cfg.smsApiKey5sim ? "****" + cfg.smsApiKey5sim.slice(-6) : "",
+    smsService: cfg.smsService || "go",
+    smsCountry: cfg.smsCountry || "6",
+    smsProduct: cfg.smsProduct || "gopay",
+    smsCountry5sim: cfg.smsCountry5sim || "indonesia",
+    smsOperator: cfg.smsOperator || "any",
+    hasHeroKey: !!cfg.smsApiKeyHero,
+    has5simKey: !!cfg.smsApiKey5sim,
+  });
+});
+
+app.post("/api/admin/sms-settings", requireAdmin, (req, res) => {
+  const cfg = loadConfig();
+  const fields = ["smsProvider", "smsApiKeyHero", "smsApiKey5sim", "smsService", "smsCountry", "smsProduct", "smsCountry5sim", "smsOperator"];
+  for (const f of fields) {
+    if (req.body[f] !== undefined && req.body[f] !== "") {
+      cfg[f] = req.body[f];
+    }
+  }
+  saveConfig(cfg);
+  console.log(`[Admin] SMS settings updated: provider=${cfg.smsProvider}, service=${cfg.smsService}, country=${cfg.smsCountry}`);
+  return res.json({ success: true });
+});
+
 // ── Address Management ───────────────────────────────────────────────────
 app.get("/api/admin/addresses", requireAdmin, (req, res) => {
   const cfg = loadConfig();
