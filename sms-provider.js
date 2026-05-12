@@ -136,11 +136,14 @@ const herosms = {
     const cfg = getConfig();
     service = service || cfg.smsService || "go";
     country = country || cfg.smsCountry || "6";
-    log(`[hero-sms] Buying number (service=${service}, country=${country})...`);
+    const maxPrice = cfg.smsMaxPrice || "0.045";
+    log(`[hero-sms] Buying number (service=${service}, country=${country}, maxPrice=$${maxPrice})...`);
+
+    const params = { service, country, maxPrice };
 
     // Try V2 first (returns JSON with full details)
     try {
-      const { json } = await this.request("getNumberV2", { service, country });
+      const { json } = await this.request("getNumberV2", params);
       if (json && json.activationId && json.phoneNumber) {
         const phone = json.phoneNumber.startsWith("+") ? json.phoneNumber : "+" + json.phoneNumber;
         log(`[hero-sms] ✅ Got number: ${phone} (id: ${json.activationId}, cost: $${json.activationCost})`);
@@ -157,7 +160,7 @@ const herosms = {
     }
 
     // Fallback to V1 (returns text)
-    const { raw } = await this.request("getNumber", { service, country });
+    const { raw } = await this.request("getNumber", params);
     // Response: ACCESS_NUMBER:123456789:628xxxxxxxxx
     const m = raw.match(/ACCESS_NUMBER:(\d+):(\d+)/);
     if (m) {
