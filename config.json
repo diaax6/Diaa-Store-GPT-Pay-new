@@ -11,7 +11,7 @@
   "gopayActiveIndex": 0,
   "smsProvider": "hero-sms",
   "smsApiKeyHero": "2e9f771885ed382bed5cA198c49f8fc5",
-  "smsService": "go",
+  "smsService": "ni",
   "smsCountry": "6",
   "smsMaxPrice": "0.045"
 }
