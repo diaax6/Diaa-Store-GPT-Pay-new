@@ -90,57 +90,75 @@ const fivesim = {
 
 // ══════════════════════════════════════════════════════════════════════════
 // HERO-SMS.COM Provider (SMS-Activate compatible API)
-// Base URL: https://hero-sms.com/api
-// Auth: apiKeyQuery — pass api_key as query parameter
+// Server: https://hero-sms.com/stubs/handler_api.php
+// Auth: apiKeyQuery — api_key as query parameter
+// Endpoints: ?action=getBalance | getNumber | getNumberV2 | getStatus |
+//            getStatusV2 | setStatus | cancelActivation | finishActivation
 // ══════════════════════════════════════════════════════════════════════════
 
 const herosms = {
-  base: "https://hero-sms.com/api",
+  base: "https://hero-sms.com/stubs/handler_api.php",
 
   getKey() {
     const cfg = getConfig();
     return cfg.smsApiKeyHero || "";
   },
 
-  async request(endpoint, params = {}) {
+  // Core request — all endpoints use ?action=XXX&api_key=YYY&param=val
+  async request(action, params = {}) {
+    params.action = action;
     params.api_key = this.getKey();
-    const url = `${this.base}/${endpoint}?${new URLSearchParams(params).toString()}`;
-    log(`[hero-sms] → ${endpoint}`, JSON.stringify(params).substring(0, 100));
+    const url = `${this.base}?${new URLSearchParams(params).toString()}`;
+    log(`[hero-sms] → ${action}`, JSON.stringify(params).substring(0, 120));
     const res = await fetch(url);
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`hero-sms ${endpoint} error ${res.status}: ${errText}`);
-    }
     const text = await res.text();
-    // Try to parse as JSON, fallback to text
-    try { return { json: JSON.parse(text), raw: text }; }
-    catch { return { json: null, raw: text }; }
+    // Parse JSON if possible (V2 endpoints + error responses)
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    // Check for API errors
+    if (!res.ok || (json && json.title)) {
+      const errMsg = json ? `${json.title}: ${json.details}` : text;
+      throw new Error(`hero-sms ${action} error (${res.status}): ${errMsg}`);
+    }
+    return { json, raw: text };
   },
 
+  // ── getBalance → "ACCESS_BALANCE:100.5" ────────────────────────
   async getBalance() {
     const { json, raw } = await this.request("getBalance");
-    if (json && json.balance !== undefined) {
-      return { balance: parseFloat(json.balance), provider: "hero-sms" };
-    }
-    // Fallback: ACCESS_BALANCE:123.45
     const m = raw.match(/ACCESS_BALANCE:([\d.]+)/);
     return { balance: m ? parseFloat(m[1]) : 0, provider: "hero-sms", raw };
   },
 
+  // ── getNumberV2 → JSON { activationId, phoneNumber, ... } ─────
+  // ── getNumber   → "ACCESS_NUMBER:ID:NUMBER" (fallback) ─────────
   async buyNumber(service, country) {
     const cfg = getConfig();
     service = service || cfg.smsService || "go";
     country = country || cfg.smsCountry || "6";
     log(`[hero-sms] Buying number (service=${service}, country=${country})...`);
-    const { json, raw } = await this.request("getNumber", { service, country });
-    
-    // JSON response: { id: "123", phone: "62812..." }
-    if (json && json.id && json.phone) {
-      const phone = json.phone.startsWith("+") ? json.phone : "+" + json.phone;
-      log(`[hero-sms] ✅ Got number: ${phone} (id: ${json.id})`);
-      return { orderId: json.id, phone, status: "PENDING" };
+
+    // Try V2 first (returns JSON with full details)
+    try {
+      const { json } = await this.request("getNumberV2", { service, country });
+      if (json && json.activationId && json.phoneNumber) {
+        const phone = json.phoneNumber.startsWith("+") ? json.phoneNumber : "+" + json.phoneNumber;
+        log(`[hero-sms] ✅ Got number: ${phone} (id: ${json.activationId}, cost: $${json.activationCost})`);
+        return {
+          orderId: json.activationId,
+          phone,
+          cost: json.activationCost,
+          operator: json.activationOperator,
+          status: "PENDING",
+        };
+      }
+    } catch (e) {
+      log(`[hero-sms] V2 failed (${e.message}), trying V1...`);
     }
-    // Text response: ACCESS_NUMBER:ID:NUMBER
+
+    // Fallback to V1 (returns text)
+    const { raw } = await this.request("getNumber", { service, country });
+    // Response: ACCESS_NUMBER:123456789:628xxxxxxxxx
     const m = raw.match(/ACCESS_NUMBER:(\d+):(\d+)/);
     if (m) {
       const phone = "+" + m[2];
@@ -150,55 +168,61 @@ const herosms = {
     throw new Error(`hero-sms buy failed: ${raw}`);
   },
 
-  async markReady(orderId) {
-    const { raw } = await this.request("setStatus", { id: orderId, status: "1" });
-    log(`[hero-sms] Mark ready: ${raw}`);
-    return raw;
-  },
-
+  // ── getStatusV2 → JSON { sms: { code, text }, ... } ───────────
+  // ── getStatus   → "STATUS_OK:CODE" or "STATUS_WAIT_CODE" ──────
   async waitForSMS(orderId, timeoutMs = 120000) {
     log(`[hero-sms] Polling SMS on id #${orderId} (timeout: ${timeoutMs / 1000}s)...`);
-    // Mark ready first
-    await this.markReady(orderId);
-
     const start = Date.now();
+
     while (Date.now() - start < timeoutMs) {
-      const { json, raw } = await this.request("getStatus", { id: orderId });
-      
-      // JSON response: { status: "STATUS_OK", code: "1234" }
-      if (json && json.code) {
-        log(`[hero-sms] ✅ Got code: ${json.code}`);
-        return { text: raw, code: json.code, sender: "GoPay" };
+      // Try V2 first for structured response
+      try {
+        const { json } = await this.request("getStatusV2", { id: orderId });
+        if (json && json.sms && json.sms.code && json.sms.code !== "code") {
+          log(`[hero-sms] ✅ V2 Got code: ${json.sms.code}`);
+          return { text: json.sms.text || "", code: json.sms.code, sender: "GoPay" };
+        }
+      } catch (e) {
+        // V2 might not be available, fall through to V1
       }
-      if (json && json.status === "STATUS_CANCEL") {
-        throw new Error("hero-sms: activation cancelled");
-      }
-      
-      // Text response: STATUS_OK:CODE
+
+      // V1 fallback
+      const { raw } = await this.request("getStatus", { id: orderId });
+
+      // STATUS_OK:100001 → code received!
       const m = raw.match(/STATUS_OK:(.+)/);
       if (m) {
         const code = m[1].trim();
         log(`[hero-sms] ✅ Got code: ${code}`);
         return { text: raw, code, sender: "GoPay" };
       }
+      // STATUS_CANCEL → activation was cancelled
       if (raw.includes("STATUS_CANCEL")) {
         throw new Error("hero-sms: activation cancelled");
       }
-      
+      // STATUS_WAIT_CODE / STATUS_WAIT_RETRY / STATUS_WAIT_RESEND → keep polling
       log(`[hero-sms] Waiting... (${((Date.now() - start) / 1000).toFixed(0)}s) → ${raw.substring(0, 80)}`);
       await new Promise(r => setTimeout(r, 5000));
     }
     throw new Error(`hero-sms SMS timeout after ${timeoutMs / 1000}s`);
   },
 
+  // ── setStatus 6 = complete activation (code received & confirmed)
   async finishOrder(orderId) {
-    log(`[hero-sms] Finishing #${orderId}`);
+    log(`[hero-sms] Finishing #${orderId} (status=6)`);
     await this.request("setStatus", { id: orderId, status: "6" });
   },
 
+  // ── setStatus 8 = cancel activation (refund money)
   async cancelOrder(orderId) {
-    log(`[hero-sms] Cancelling #${orderId}`);
+    log(`[hero-sms] Cancelling #${orderId} (status=8)`);
     await this.request("setStatus", { id: orderId, status: "8" });
+  },
+
+  // ── setStatus 3 = request SMS resend
+  async resendSMS(orderId) {
+    log(`[hero-sms] Requesting SMS resend #${orderId} (status=3)`);
+    await this.request("setStatus", { id: orderId, status: "3" });
   },
 };
 
