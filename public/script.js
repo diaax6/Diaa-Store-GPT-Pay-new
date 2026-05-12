@@ -750,6 +750,59 @@
     }
   };
 
+  // ── GoPay Auto-SMS (Direct API + Virtual Number) ─────────────────
+  window.doAutoSmsGopay = async function () {
+    const midtransUrl = $("gopayLink").value;
+    if (!midtransUrl || !midtransUrl.includes("midtrans.com")) {
+      alert("No valid Midtrans URL. Run Auto Checkout first.");
+      return;
+    }
+
+    const btn = $("btnAutoSms");
+    const resultDiv = $("gopayActivateResult");
+    const spinner = $("autoSmsSpinner");
+
+    btn.disabled = true;
+    spinner.classList.remove("hidden");
+    resultDiv.className = "";
+    resultDiv.style.background = "rgba(245,158,11,0.15)";
+    resultDiv.style.color = "#f59e0b";
+    resultDiv.innerHTML = "📱 Buying virtual number & starting automation...";
+    resultDiv.classList.remove("hidden");
+
+    try {
+      const res = await fetch("/api/gopay/auto-sms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ midtransUrl }),
+      });
+      const data = await res.json();
+
+      resultDiv.classList.remove("hidden");
+      if (data.success) {
+        resultDiv.style.background = "rgba(16,185,129,0.15)";
+        resultDiv.style.color = "#10b981";
+        resultDiv.innerHTML = `✅ Payment completed via SMS!<br><small>Phone: ${data.phone || "N/A"}</small>`;
+      } else if (data.waitingForOTP) {
+        resultDiv.style.background = "rgba(245,158,11,0.15)";
+        resultDiv.style.color = "#f59e0b";
+        resultDiv.innerHTML = `⏳ ${data.message || "Waiting for OTP..."}<br><small>Ref: ${data.referenceId || "N/A"}</small>`;
+      } else {
+        resultDiv.style.background = "rgba(239,68,68,0.15)";
+        resultDiv.style.color = "#ef4444";
+        resultDiv.innerHTML = `❌ ${data.error || "Auto-SMS payment failed"}`;
+      }
+    } catch (err) {
+      resultDiv.classList.remove("hidden");
+      resultDiv.style.background = "rgba(239,68,68,0.15)";
+      resultDiv.style.color = "#ef4444";
+      resultDiv.innerHTML = `❌ ${err.message}`;
+    } finally {
+      btn.disabled = false;
+      spinner.classList.add("hidden");
+    }
+  };
+
   // ── Cancel Subscription ────────────────────────────────────────
   window.doCancelSub = async function () {
     const sessionJson = $("sessionInput").value.trim();

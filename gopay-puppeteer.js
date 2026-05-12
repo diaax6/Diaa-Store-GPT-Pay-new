@@ -1,339 +1,426 @@
 // ══════════════════════════════════════════════════════════════════════════
-// GoPay Puppeteer — Browser-based payment automation
-// Opens the Midtrans snap page and completes payment like a real user
+// GoPay Puppeteer — Full browser automation with SMS OTP from 5sim
+// Opens Midtrans snap page → enters phone → OTP via SMS → PIN → Payment
 // ══════════════════════════════════════════════════════════════════════════
 
 const puppeteer = require("puppeteer");
 const path = require("path");
 const fs = require("fs");
+const sms = require("./sms-provider");
 
 const SCREENSHOTS_DIR = path.join(__dirname, "screenshots");
 if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
 
-async function screenshot(page, name) {
+function log(...args) { console.log("[Puppeteer]", ...args); }
+
+async function shot(page, name) {
   const fp = path.join(SCREENSHOTS_DIR, `${name}_${Date.now()}.png`);
-  try { await page.screenshot({ path: fp, fullPage: true }); } catch(e) {}
-  console.log(`[Puppeteer] 📸 ${name}`);
+  try { await page.screenshot({ path: fp, fullPage: true }); } catch (e) {}
+  log(`📸 ${name}`);
   return fp;
 }
 
-// Helper: wait and retry clicking
-async function clickByText(page, text, timeout = 5000) {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    const clicked = await page.evaluate((t) => {
-      const els = [...document.querySelectorAll("button, a, div, span, li, label, input, td")];
-      for (const el of els) {
-        const txt = (el.textContent || "").trim();
-        if (txt.toLowerCase().includes(t.toLowerCase())) {
-          const target = el.closest("button, a, li, label, div[role='button'], tr, td") || el;
-          target.click();
-          return txt.substring(0, 60);
-        }
-      }
-      const imgs = [...document.querySelectorAll("img")];
-      for (const img of imgs) {
-        if ((img.src || "").toLowerCase().includes(t.toLowerCase())) {
-          const target = img.closest("button, a, li, div, label, tr") || img;
-          target.click();
-          return "img:" + img.src.substring(0, 60);
-        }
-      }
-      return null;
-    }, text);
-    if (clicked) { console.log(`[Puppeteer] Clicked: "${clicked}"`); return true; }
-    await new Promise(r => setTimeout(r, 500));
-  }
-  return false;
-}
-
-// Helper: type into input found near label text
-async function typeNearLabel(page, labelText, value) {
-  return page.evaluate((label, val) => {
-    const els = [...document.querySelectorAll("label, span, div, p")];
-    for (const el of els) {
-      if ((el.textContent || "").toLowerCase().includes(label.toLowerCase())) {
-        const container = el.closest("div, form, section") || el.parentElement;
-        if (container) {
-          const input = container.querySelector("input:not([type='hidden']), input[type='tel'], input[type='text'], input[type='number']");
-          if (input) { input.value = val; input.dispatchEvent(new Event("input", { bubbles: true })); return true; }
-        }
-      }
-    }
-    // Fallback: find tel/number inputs
-    const telInputs = document.querySelectorAll("input[type='tel'], input[type='number'], input[inputmode='numeric']");
-    if (telInputs.length > 0) { telInputs[0].value = val; telInputs[0].dispatchEvent(new Event("input", { bubbles: true })); return true; }
-    return false;
-  }, labelText, value);
+// Save page HTML for debugging
+async function saveHTML(page, name) {
+  const fp = path.join(SCREENSHOTS_DIR, `${name}_${Date.now()}.html`);
+  try { fs.writeFileSync(fp, await page.content()); } catch (e) {}
 }
 
 // ══════════════════════════════════════════════════════════════════════════
-// Main: Automate GoPay payment via Puppeteer
+// Main: Full automated GoPay payment with SMS OTP
 // ══════════════════════════════════════════════════════════════════════════
 async function automateGoPayBrowser(midtransUrl, phone, pin, waitForOTP) {
-  console.log("\n[Puppeteer] ════════════════════════════════════════");
-  console.log("[Puppeteer] Starting GoPay Browser Automation");
-  console.log("[Puppeteer] URL:", midtransUrl);
-  console.log("[Puppeteer] Phone:", phone);
-  console.log("[Puppeteer] ════════════════════════════════════════\n");
+  log("════════════════════════════════════════");
+  log("Starting GoPay Browser + SMS Automation");
+  log("URL:", midtransUrl);
+  log("Phone:", phone);
+  log("════════════════════════════════════════\n");
 
   let browser;
-  const networkLog = [];
   const screenshots = [];
+  const networkLog = [];
 
   try {
     browser = await puppeteer.launch({
       headless: "new",
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+      executablePath: "/usr/bin/chromium-browser",
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-web-security",
+      ],
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 412, height: 915, isMobile: true });
-    await page.setUserAgent("Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36");
+    await page.setViewport({ width: 420, height: 900, isMobile: true });
+    await page.setUserAgent(
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+    );
 
-    // Capture network for debugging
+    // Track network
     page.on("response", async (res) => {
       const u = res.url();
       if (u.includes("midtrans") || u.includes("gopay") || u.includes("gojek")) {
-        const entry = { url: u.substring(0, 200), status: res.status() };
-        try {
-          if (res.headers()["content-type"]?.includes("json")) {
-            entry.body = (await res.text()).substring(0, 500);
-          }
-        } catch(e) {}
-        networkLog.push(entry);
+        networkLog.push({ url: u.substring(0, 200), status: res.status() });
       }
     });
 
-    // ── Step 1: Open Midtrans page ──────────────────────────────────
-    console.log("[Puppeteer] Step 1: Opening Midtrans page...");
+    // ── Step 1: Open Midtrans snap page ─────────────────────────────
+    log("Step 1: Opening Midtrans snap page...");
     await page.goto(midtransUrl, { waitUntil: "networkidle2", timeout: 30000 });
-    await new Promise(r => setTimeout(r, 3000));
-    screenshots.push(await screenshot(page, "step1_loaded"));
+    await page.waitForFunction(() => document.body.innerText.length > 50, { timeout: 10000 });
+    await new Promise((r) => setTimeout(r, 2000));
+    screenshots.push(await shot(page, "01_page_loaded"));
+    await saveHTML(page, "01_page");
 
-    // Save HTML for debugging
-    const html = await page.content();
-    fs.writeFileSync(path.join(SCREENSHOTS_DIR, "page.html"), html);
-    console.log("[Puppeteer] Step 1: Page loaded, title:", await page.title());
+    const pageTitle = await page.title();
+    log("Step 1: Page loaded —", pageTitle);
 
-    // Log all visible text for debugging
-    const pageTexts = await page.evaluate(() => {
-      const texts = [];
-      document.querySelectorAll("*").forEach(el => {
-        const t = el.textContent?.trim();
-        if (t && t.length < 80 && t.length > 1 && !texts.includes(t)) texts.push(t);
-      });
-      return texts.slice(0, 40);
-    });
-    console.log("[Puppeteer] Page texts:", JSON.stringify(pageTexts).substring(0, 500));
+    // ── Step 2: Find phone input and enter number ────────────────────
+    log("Step 2: Looking for phone input...");
 
-    // ── Step 2: Select GoPay ────────────────────────────────────────
-    console.log("[Puppeteer] Step 2: Selecting GoPay...");
-    let gopayFound = await clickByText(page, "gopay", 8000);
-    if (!gopayFound) gopayFound = await clickByText(page, "GoPay", 3000);
-    if (!gopayFound) {
-      // Try clicking by CSS selectors
-      gopayFound = await page.evaluate(() => {
-        const sels = ['[data-payment="gopay"]', '[data-payment-type="gopay"]', '.gopay', '[class*="gopay"]', 'input[value="gopay"]'];
-        for (const s of sels) { const el = document.querySelector(s); if (el) { el.click(); return true; } }
-        return false;
-      });
-    }
+    // The phone number from config includes country code (e.g. "81234567890")
+    // The page has a country code selector (+62) and a phone input
+    // We need to enter just the local part (without 62 prefix)
+    let localPhone = phone;
+    if (localPhone.startsWith("+62")) localPhone = localPhone.substring(3);
+    if (localPhone.startsWith("62")) localPhone = localPhone.substring(2);
+    if (localPhone.startsWith("0")) localPhone = localPhone.substring(1);
 
-    if (!gopayFound) {
-      screenshots.push(await screenshot(page, "step2_gopay_not_found"));
-      return { success: false, error: "GoPay option not found on page", screenshots, networkLog, pageTexts };
-    }
-
-    await new Promise(r => setTimeout(r, 2000));
-    screenshots.push(await screenshot(page, "step2_gopay_selected"));
-    console.log("[Puppeteer] Step 2: ✅ GoPay selected");
-
-    // ── Step 3: Enter phone number ──────────────────────────────────
-    console.log("[Puppeteer] Step 3: Entering phone number...");
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Try to find and fill phone input
-    const phoneEntered = await page.evaluate((ph) => {
-      // Strategy 1: Find inputs with phone-related attributes
-      const inputs = document.querySelectorAll("input[type='tel'], input[type='number'], input[inputmode='numeric'], input[placeholder*='phone'], input[placeholder*='nomor'], input[placeholder*='Phone'], input[name*='phone']");
-      for (const input of inputs) {
-        input.focus();
-        input.value = ph;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        return "direct:" + (input.placeholder || input.name || "input");
-      }
-      // Strategy 2: Any visible text input
-      const allInputs = document.querySelectorAll("input:not([type='hidden']):not([type='submit']):not([type='checkbox'])");
-      for (const input of allInputs) {
-        if (input.offsetParent !== null) { // visible
-          input.focus();
-          input.value = ph;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          return "fallback:" + (input.placeholder || input.type);
+    // Try to find and clear any existing phone input, then type
+    const phoneTyped = await page.evaluate(() => {
+      const inputs = document.querySelectorAll("input[type='tel'], input[type='text'], input[type='number'], input[inputmode='numeric']");
+      for (const inp of inputs) {
+        if (inp.offsetParent !== null && !inp.readOnly) {
+          inp.focus();
+          inp.value = "";
+          return { found: true, id: inp.id, name: inp.name, placeholder: inp.placeholder };
         }
       }
-      return null;
-    }, phone);
+      return { found: false };
+    });
 
-    console.log("[Puppeteer] Step 3: Phone input:", phoneEntered);
-    if (!phoneEntered) {
-      screenshots.push(await screenshot(page, "step3_no_phone_input"));
-      // Maybe phone is not needed (already linked)
-      console.log("[Puppeteer] Step 3: No phone input — may already be linked");
-    } else {
-      screenshots.push(await screenshot(page, "step3_phone_entered"));
+    if (!phoneTyped.found) {
+      screenshots.push(await shot(page, "02_no_phone_input"));
+      return { success: false, error: "Phone input not found on page", screenshots, networkLog };
     }
 
-    // ── Step 4: Click submit/continue/link button ───────────────────
-    console.log("[Puppeteer] Step 4: Clicking submit...");
-    await new Promise(r => setTimeout(r, 1000));
+    log("Step 2: Found phone input:", JSON.stringify(phoneTyped));
 
-    const submitClicked = await clickByText(page, "Hubungkan", 3000)
-      || await clickByText(page, "Lanjutkan", 3000)
-      || await clickByText(page, "Continue", 3000)
-      || await clickByText(page, "Submit", 3000)
-      || await clickByText(page, "Link", 3000)
-      || await clickByText(page, "Bayar", 3000)
-      || await clickByText(page, "Pay", 3000);
+    // Use page.type() for proper React/Vue event triggering
+    const inputSelector = phoneTyped.id
+      ? `#${phoneTyped.id}`
+      : phoneTyped.name
+        ? `input[name="${phoneTyped.name}"]`
+        : "input[type='tel'], input[type='text'], input[inputmode='numeric']";
 
-    if (!submitClicked) {
-      // Try any primary button
-      await page.evaluate(() => {
-        const btns = document.querySelectorAll("button[type='submit'], .btn-primary, .btn-main, button.primary");
-        if (btns.length > 0) btns[0].click();
-      });
-    }
+    await page.click(inputSelector);
+    await page.evaluate((sel) => { document.querySelector(sel).value = ""; }, inputSelector);
+    await page.type(inputSelector, localPhone, { delay: 50 });
+    await new Promise((r) => setTimeout(r, 1000));
+    screenshots.push(await shot(page, "02_phone_entered"));
+    log("Step 2: ✅ Phone entered:", localPhone);
 
-    await new Promise(r => setTimeout(r, 3000));
-    screenshots.push(await screenshot(page, "step4_submitted"));
-    console.log("[Puppeteer] Step 4: Submitted");
+    // ── Step 3: Click submit/link button ──────────────────────────────
+    log("Step 3: Looking for submit button...");
+    await new Promise((r) => setTimeout(r, 500));
 
-    // ── Step 5: Wait for OTP ────────────────────────────────────────
-    console.log("[Puppeteer] Step 5: Waiting for OTP...");
+    // Strategy: Find buttons that are NOT the country selector
+    const btnClicked = await page.evaluate(() => {
+      const buttons = document.querySelectorAll("button, input[type='submit'], a.btn, [role='button']");
+      for (const btn of buttons) {
+        const text = (btn.textContent || "").trim().toLowerCase();
+        const isVisible = btn.offsetParent !== null;
+        const isNotDropdown = !btn.closest("select") && !text.includes("indonesia") && !text.includes("+62");
 
-    // Check if page is asking for OTP
-    const needsOTP = await page.evaluate(() => {
+        // Look for submit-type buttons
+        if (isVisible && isNotDropdown && (
+          btn.type === "submit" ||
+          text.includes("link") ||
+          text.includes("hubungkan") ||
+          text.includes("lanjutkan") ||
+          text.includes("continue") ||
+          text.includes("connect") ||
+          text.includes("proceed")
+        )) {
+          btn.click();
+          return { clicked: true, text: text.substring(0, 50), tag: btn.tagName };
+        }
+      }
+
+      // Fallback: click any primary-looking button
+      const primary = document.querySelector("button.primary, button.btn-primary, .button-primary, button[class*='primary'], button[class*='submit']");
+      if (primary && primary.offsetParent !== null) {
+        primary.click();
+        return { clicked: true, text: (primary.textContent || "").trim().substring(0, 50), tag: "primary-class" };
+      }
+
+      // Last resort: click the last visible button (usually submit at bottom)
+      const allBtns = [...document.querySelectorAll("button")].filter((b) => b.offsetParent !== null);
+      if (allBtns.length > 0) {
+        const last = allBtns[allBtns.length - 1];
+        last.click();
+        return { clicked: true, text: (last.textContent || "").trim().substring(0, 50), tag: "last-button" };
+      }
+
+      return { clicked: false };
+    });
+
+    log("Step 3:", JSON.stringify(btnClicked));
+    await new Promise((r) => setTimeout(r, 3000));
+    screenshots.push(await shot(page, "03_submitted"));
+    await saveHTML(page, "03_after_submit");
+
+    // ── Step 4: Wait for OTP ──────────────────────────────────────────
+    log("Step 4: Waiting for OTP page...");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // Check page state
+    const pageState = await page.evaluate(() => {
       const text = document.body.innerText.toLowerCase();
-      return text.includes("otp") || text.includes("verifikasi") || text.includes("kode") || text.includes("verification");
-    });
-
-    let otpCode = null;
-    if (needsOTP && waitForOTP) {
-      console.log("[Puppeteer] Step 5: OTP needed — waiting...");
-      try {
-        otpCode = await waitForOTP(60000); // 60s timeout
-        console.log("[Puppeteer] Step 5: Got OTP:", otpCode);
-      } catch(e) {
-        console.log("[Puppeteer] Step 5: OTP wait failed:", e.message);
-      }
-    }
-
-    if (otpCode) {
-      // Enter OTP
-      const otpEntered = await page.evaluate((otp) => {
-        // OTP might be separate inputs (one per digit)
-        const otpInputs = document.querySelectorAll("input[maxlength='1']");
-        if (otpInputs.length >= 4) {
-          const digits = otp.split("");
-          otpInputs.forEach((inp, i) => {
-            if (digits[i]) { inp.value = digits[i]; inp.dispatchEvent(new Event("input", { bubbles: true })); }
-          });
-          return "split:" + otpInputs.length;
-        }
-        // Single OTP input
-        const inputs = document.querySelectorAll("input[type='tel'], input[type='number'], input[inputmode='numeric'], input:not([type='hidden'])");
-        for (const inp of inputs) {
-          if (inp.offsetParent !== null) {
-            inp.focus(); inp.value = otp;
-            inp.dispatchEvent(new Event("input", { bubbles: true }));
-            return "single";
-          }
-        }
-        return null;
-      }, otpCode);
-      console.log("[Puppeteer] Step 5: OTP entered:", otpEntered);
-
-      // Click verify/submit
-      await new Promise(r => setTimeout(r, 1000));
-      await clickByText(page, "Verifikasi", 3000) || await clickByText(page, "Verify", 3000) || await clickByText(page, "Submit", 3000);
-      await new Promise(r => setTimeout(r, 3000));
-      screenshots.push(await screenshot(page, "step5_otp_submitted"));
-    } else if (needsOTP) {
-      // Return waiting for manual OTP
-      screenshots.push(await screenshot(page, "step5_waiting_otp"));
       return {
-        success: false,
-        waitingForOTP: true,
-        message: "OTP needed — enter manually",
-        screenshots, networkLog,
+        hasOTP: text.includes("otp") || text.includes("verifikasi") || text.includes("verification") || text.includes("kode"),
+        hasPIN: text.includes("pin") || text.includes("security code"),
+        hasError: text.includes("error") || text.includes("invalid") || text.includes("gagal"),
+        hasSuccess: text.includes("success") || text.includes("berhasil"),
+        sample: document.body.innerText.substring(0, 300),
       };
-    }
-
-    // ── Step 6: Enter PIN ───────────────────────────────────────────
-    console.log("[Puppeteer] Step 6: Checking for PIN...");
-    await new Promise(r => setTimeout(r, 2000));
-
-    const needsPIN = await page.evaluate(() => {
-      const text = document.body.innerText.toLowerCase();
-      return text.includes("pin") || text.includes("security code");
     });
 
-    if (needsPIN && pin) {
-      console.log("[Puppeteer] Step 6: Entering PIN...");
+    log("Step 4: Page state:", JSON.stringify({ hasOTP: pageState.hasOTP, hasPIN: pageState.hasPIN }));
+    log("Step 4: Page text:", pageState.sample.substring(0, 200));
+
+    // Get OTP from the callback (either WhatsApp listener or 5sim SMS)
+    if (pageState.hasOTP && waitForOTP) {
+      log("Step 4: OTP required — calling OTP provider...");
+
+      let otpCode;
+      try {
+        otpCode = await waitForOTP(120000); // 2 min timeout
+      } catch (e) {
+        log("Step 4: OTP timeout:", e.message);
+        screenshots.push(await shot(page, "04_otp_timeout"));
+        return { success: false, error: "OTP timeout: " + e.message, waitingForOTP: true, screenshots, networkLog };
+      }
+
+      if (otpCode) {
+        log("Step 4: Got OTP:", otpCode);
+
+        // Enter OTP — try split inputs first, then single
+        const otpEntered = await page.evaluate((code) => {
+          // Split inputs (one digit each)
+          const splitInputs = document.querySelectorAll("input[maxlength='1']");
+          if (splitInputs.length >= 4) {
+            const digits = code.toString().split("");
+            splitInputs.forEach((inp, i) => {
+              if (digits[i]) {
+                inp.focus();
+                inp.value = digits[i];
+                inp.dispatchEvent(new Event("input", { bubbles: true }));
+                inp.dispatchEvent(new Event("change", { bubbles: true }));
+              }
+            });
+            return "split:" + splitInputs.length;
+          }
+
+          // Single input
+          const inputs = document.querySelectorAll("input[type='tel'], input[type='number'], input[type='text'], input[inputmode='numeric']");
+          for (const inp of inputs) {
+            if (inp.offsetParent !== null && !inp.readOnly) {
+              inp.focus();
+              inp.value = code;
+              inp.dispatchEvent(new Event("input", { bubbles: true }));
+              inp.dispatchEvent(new Event("change", { bubbles: true }));
+              return "single";
+            }
+          }
+          return null;
+        }, otpCode);
+
+        log("Step 4: OTP entered:", otpEntered);
+
+        // Click verify/submit
+        await new Promise((r) => setTimeout(r, 1000));
+        await page.evaluate(() => {
+          const btns = [...document.querySelectorAll("button")].filter((b) => b.offsetParent !== null);
+          for (const btn of btns) {
+            const t = (btn.textContent || "").toLowerCase();
+            if (t.includes("verif") || t.includes("submit") || t.includes("confirm") || t.includes("lanjut")) {
+              btn.click();
+              return;
+            }
+          }
+          // Click last visible button as fallback
+          if (btns.length > 0) btns[btns.length - 1].click();
+        });
+
+        await new Promise((r) => setTimeout(r, 3000));
+        screenshots.push(await shot(page, "04_otp_submitted"));
+      }
+    }
+
+    // ── Step 5: Enter PIN ──────────────────────────────────────────────
+    log("Step 5: Checking for PIN page...");
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const pinState = await page.evaluate(() => {
+      const text = document.body.innerText.toLowerCase();
+      return {
+        hasPIN: text.includes("pin") || text.includes("security"),
+        hasPayment: text.includes("payment") || text.includes("bayar") || text.includes("pay"),
+        sample: document.body.innerText.substring(0, 300),
+      };
+    });
+
+    if (pinState.hasPIN && pin) {
+      log("Step 5: Entering PIN...");
+
+      // PIN is typically split inputs
       await page.evaluate((p) => {
-        // PIN might be separate inputs
-        const pinInputs = document.querySelectorAll("input[maxlength='1'][type='password'], input[maxlength='1'][type='tel'], input[maxlength='1']");
+        const pinInputs = document.querySelectorAll("input[maxlength='1'], input[type='password']");
         if (pinInputs.length >= 4) {
           p.split("").forEach((d, i) => {
-            if (pinInputs[i]) { pinInputs[i].value = d; pinInputs[i].dispatchEvent(new Event("input", { bubbles: true })); }
+            if (pinInputs[i]) {
+              pinInputs[i].focus();
+              pinInputs[i].value = d;
+              pinInputs[i].dispatchEvent(new Event("input", { bubbles: true }));
+              pinInputs[i].dispatchEvent(new Event("change", { bubbles: true }));
+            }
           });
           return;
         }
         // Single PIN input
-        const inputs = document.querySelectorAll("input[type='password'], input[type='tel'], input[inputmode='numeric']");
+        const inputs = document.querySelectorAll("input[type='password'], input[type='tel']");
         for (const inp of inputs) {
           if (inp.offsetParent !== null) {
-            inp.focus(); inp.value = p; inp.dispatchEvent(new Event("input", { bubbles: true })); break;
+            inp.focus();
+            inp.value = p;
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            break;
           }
         }
       }, pin);
 
-      await new Promise(r => setTimeout(r, 1000));
-      await clickByText(page, "Konfirmasi", 3000) || await clickByText(page, "Confirm", 3000) || await clickByText(page, "Submit", 3000) || await clickByText(page, "Bayar", 3000);
-      await new Promise(r => setTimeout(r, 3000));
-      screenshots.push(await screenshot(page, "step6_pin_submitted"));
-      console.log("[Puppeteer] Step 6: PIN submitted");
+      await new Promise((r) => setTimeout(r, 1000));
+
+      // Click confirm
+      await page.evaluate(() => {
+        const btns = [...document.querySelectorAll("button")].filter((b) => b.offsetParent !== null);
+        for (const btn of btns) {
+          const t = (btn.textContent || "").toLowerCase();
+          if (t.includes("konfirmasi") || t.includes("confirm") || t.includes("submit") || t.includes("bayar") || t.includes("pay")) {
+            btn.click();
+            return;
+          }
+        }
+        if (btns.length > 0) btns[btns.length - 1].click();
+      });
+
+      await new Promise((r) => setTimeout(r, 5000));
+      screenshots.push(await shot(page, "05_pin_submitted"));
+      log("Step 5: PIN submitted");
     }
 
-    // ── Step 7: Wait for payment result ─────────────────────────────
-    console.log("[Puppeteer] Step 7: Waiting for payment result...");
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 3000));
-      const currentUrl = page.url();
-      const pageText = await page.evaluate(() => document.body.innerText.substring(0, 500));
-      console.log(`[Puppeteer] Poll #${i+1}: ${currentUrl.substring(0, 80)}`);
+    // ── Step 6: Wait for payment OTP (60 second delay) ──────────────
+    log("Step 6: Checking if payment OTP needed...");
+    await new Promise((r) => setTimeout(r, 3000));
 
-      if (pageText.toLowerCase().includes("success") || pageText.toLowerCase().includes("berhasil") || pageText.toLowerCase().includes("settlement")) {
-        screenshots.push(await screenshot(page, "step7_success"));
-        console.log("[Puppeteer] Step 7: ✅ PAYMENT SUCCESS!");
+    const afterPinState = await page.evaluate(() => {
+      const text = document.body.innerText.toLowerCase();
+      return {
+        hasOTP: text.includes("otp") || text.includes("verifikasi") || text.includes("kode"),
+        hasSuccess: text.includes("success") || text.includes("berhasil") || text.includes("settlement"),
+        hasPending: text.includes("pending") || text.includes("waiting") || text.includes("menunggu"),
+        sample: document.body.innerText.substring(0, 300),
+      };
+    });
+
+    log("Step 6: State:", JSON.stringify({ hasOTP: afterPinState.hasOTP, hasSuccess: afterPinState.hasSuccess }));
+
+    if (afterPinState.hasSuccess) {
+      screenshots.push(await shot(page, "06_success"));
+      log("✅ PAYMENT SUCCESS!");
+      return { success: true, message: "Payment completed!", screenshots, networkLog };
+    }
+
+    // If page shows OTP again (payment verification), wait and enter
+    if (afterPinState.hasOTP && waitForOTP) {
+      log("Step 6: Payment OTP required — waiting 60 seconds for SMS...");
+      screenshots.push(await shot(page, "06_payment_otp_needed"));
+
+      let paymentOTP;
+      try {
+        paymentOTP = await waitForOTP(180000); // 3 min timeout for payment OTP
+      } catch (e) {
+        log("Step 6: Payment OTP timeout:", e.message);
+        return { success: false, error: "Payment OTP timeout", screenshots, networkLog };
+      }
+
+      if (paymentOTP) {
+        log("Step 6: Got payment OTP:", paymentOTP);
+
+        await page.evaluate((code) => {
+          const splitInputs = document.querySelectorAll("input[maxlength='1']");
+          if (splitInputs.length >= 4) {
+            code.toString().split("").forEach((d, i) => {
+              if (splitInputs[i]) {
+                splitInputs[i].focus();
+                splitInputs[i].value = d;
+                splitInputs[i].dispatchEvent(new Event("input", { bubbles: true }));
+              }
+            });
+            return;
+          }
+          const inputs = document.querySelectorAll("input[type='tel'], input[type='number'], input[inputmode='numeric']");
+          for (const inp of inputs) {
+            if (inp.offsetParent !== null) { inp.value = code; inp.dispatchEvent(new Event("input", { bubbles: true })); break; }
+          }
+        }, paymentOTP);
+
+        await new Promise((r) => setTimeout(r, 1000));
+        await page.evaluate(() => {
+          const btns = [...document.querySelectorAll("button")].filter((b) => b.offsetParent !== null);
+          if (btns.length > 0) btns[btns.length - 1].click();
+        });
+
+        await new Promise((r) => setTimeout(r, 5000));
+        screenshots.push(await shot(page, "06_payment_otp_submitted"));
+      }
+    }
+
+    // ── Step 7: Poll for result ──────────────────────────────────────
+    log("Step 7: Waiting for payment result...");
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const result = await page.evaluate(() => {
+        const text = document.body.innerText.toLowerCase();
+        return {
+          success: text.includes("success") || text.includes("berhasil") || text.includes("settlement") || text.includes("thank"),
+          failed: text.includes("fail") || text.includes("gagal") || text.includes("expired") || text.includes("declined"),
+          text: document.body.innerText.substring(0, 200),
+        };
+      });
+
+      if (result.success) {
+        screenshots.push(await shot(page, "07_success"));
+        log("✅ PAYMENT SUCCESS!");
         return { success: true, message: "Payment completed!", screenshots, networkLog };
       }
-
-      if (pageText.toLowerCase().includes("fail") || pageText.toLowerCase().includes("gagal") || pageText.toLowerCase().includes("expired")) {
-        screenshots.push(await screenshot(page, "step7_failed"));
-        return { success: false, error: "Payment failed: " + pageText.substring(0, 200), screenshots, networkLog };
+      if (result.failed) {
+        screenshots.push(await shot(page, "07_failed"));
+        return { success: false, error: "Payment failed: " + result.text.substring(0, 150), screenshots, networkLog };
       }
+
+      log(`Poll #${i + 1}: waiting... URL: ${page.url().substring(0, 80)}`);
     }
 
-    // Final screenshot
-    screenshots.push(await screenshot(page, "step7_timeout"));
-    const finalText = await page.evaluate(() => document.body.innerText.substring(0, 300));
-    return { success: false, error: "Payment timed out", finalPageText: finalText, screenshots, networkLog };
+    screenshots.push(await shot(page, "07_timeout"));
+    return { success: false, error: "Payment result timeout", screenshots, networkLog };
 
   } catch (err) {
-    console.error("[Puppeteer] ERROR:", err.message);
+    log("ERROR:", err.message);
     return { success: false, error: err.message, screenshots, networkLog };
   } finally {
     if (browser) await browser.close().catch(() => {});

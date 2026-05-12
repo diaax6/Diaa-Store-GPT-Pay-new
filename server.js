@@ -7,6 +7,7 @@ const { COUNTRIES_LIST, STATES } = require("./countries");
 const whatsapp = require("./whatsapp");
 const { automateGoPay, continueWithOTP } = require("./midtrans-auto");
 const { automateGoPayBrowser } = require("./gopay-puppeteer");
+const smsProvider = require("./sms-provider");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -697,6 +698,133 @@ app.post("/api/gopay/browser", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("[GoPay-Browser] ERROR:", err.message);
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// GoPay Auto-SMS — Full automated payment with virtual SMS numbers
+// Direct API + 5sim/hero-sms OTP (no Puppeteer, no WhatsApp)
+// ══════════════════════════════════════════════════════════════════════════
+app.post("/api/gopay/auto-sms", requireAuth, async (req, res) => {
+  const { midtransUrl } = req.body;
+  if (!midtransUrl) return res.status(400).json({ error: "midtransUrl required" });
+
+  const cfg = loadConfig();
+  const pin = cfg.gopayAccounts?.[0]?.pin || cfg.gopayPin || "";
+
+  if (!pin) return res.status(400).json({ error: "No GoPay PIN configured" });
+
+  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`[Auto-SMS] Starting automated GoPay payment via SMS`);
+  console.log(`[Auto-SMS] URL: ${midtransUrl}`);
+  console.log(`${'═'.repeat(60)}\n`);
+
+  let smsOrder = null;
+
+  try {
+    // ── Step 1: Buy virtual number ─────────────────────────────────
+    console.log("[Auto-SMS] Step 1: Buying virtual number...");
+    smsOrder = await smsProvider.buyNumber();
+    console.log(`[Auto-SMS] Step 1: ✅ Got number: ${smsOrder.phone}`);
+
+    // Strip the + and country code for the phone number
+    let phone = smsOrder.phone;
+    if (phone.startsWith("+62")) phone = phone.substring(3);
+    if (phone.startsWith("+")) phone = phone.substring(1);
+    if (phone.startsWith("62")) phone = phone.substring(2);
+
+    // ── Step 2: Start Midtrans linking with this number ────────────
+    console.log("[Auto-SMS] Step 2: Starting GoPay linking via Direct API...");
+    const linkResult = await automateGoPay(
+      midtransUrl,
+      phone,
+      pin,
+      null // No WhatsApp — we'll handle OTP manually
+    );
+
+    console.log("[Auto-SMS] Step 2 result:", JSON.stringify(linkResult).substring(0, 300));
+
+    // ── Step 3: If OTP needed, get it from SMS ─────────────────────
+    if (linkResult.waitingForOTP && linkResult.referenceId) {
+      console.log("[Auto-SMS] Step 3: Waiting for OTP via SMS...");
+
+      // Wait for OTP SMS (up to 2 minutes)
+      const smsResult = await smsProvider.waitForSMS(smsOrder.orderId, 120000);
+      const otpCode = smsResult.code || smsProvider.extractOTP(smsResult.text);
+
+      if (!otpCode) {
+        throw new Error("Could not extract OTP from SMS: " + smsResult.text);
+      }
+
+      console.log(`[Auto-SMS] Step 3: ✅ Got OTP: ${otpCode}`);
+      await smsProvider.finishOrder(smsOrder.orderId);
+
+      // ── Step 4: Submit OTP + PIN ──────────────────────────────────
+      console.log("[Auto-SMS] Step 4: Submitting OTP...");
+      const otpResult = await continueWithOTP(
+        linkResult.referenceId,
+        otpCode,
+        pin
+      );
+
+      console.log("[Auto-SMS] Step 4 result:", JSON.stringify(otpResult).substring(0, 500));
+
+      // ── Step 5: If payment OTP needed, wait 60s then get from SMS ──
+      if (otpResult.waitingForOTP && otpResult.isPayment && otpResult.referenceId) {
+        console.log("[Auto-SMS] Step 5: Payment requires OTP — waiting 60s for SMS...");
+
+        // Buy another number for payment OTP (or re-use)
+        let payOrder = null;
+        try {
+          payOrder = await smsProvider.buyNumber();
+          console.log(`[Auto-SMS] Step 5: New number for payment OTP: ${payOrder.phone}`);
+        } catch (e) {
+          console.log(`[Auto-SMS] Step 5: Re-buy failed, using same number`);
+        }
+
+        // Wait 60 seconds as user mentioned
+        console.log("[Auto-SMS] Step 5: Waiting 60 seconds for payment SMS...");
+        await new Promise(r => setTimeout(r, 60000));
+
+        // Poll for payment OTP
+        const payOrderId = payOrder ? payOrder.orderId : smsOrder.orderId;
+        const paySMS = await smsProvider.waitForSMS(payOrderId, 120000);
+        const payOTP = paySMS.code || smsProvider.extractOTP(paySMS.text);
+
+        if (!payOTP) throw new Error("Could not get payment OTP: " + paySMS.text);
+
+        console.log(`[Auto-SMS] Step 5: ✅ Payment OTP: ${payOTP}`);
+        if (payOrder) await smsProvider.finishOrder(payOrder.orderId);
+
+        // Submit payment OTP
+        const payResult = await continueWithOTP(otpResult.referenceId, payOTP, pin);
+        console.log("[Auto-SMS] Step 5 result:", JSON.stringify(payResult).substring(0, 300));
+        return res.json({ ...payResult, method: "auto-sms", phone: smsOrder.phone });
+      }
+
+      return res.json({ ...otpResult, method: "auto-sms", phone: smsOrder.phone });
+    }
+
+    // If linking succeeded without OTP (already linked)
+    return res.json({ ...linkResult, method: "auto-sms", phone: smsOrder.phone });
+
+  } catch (err) {
+    console.error("[Auto-SMS] ERROR:", err.message);
+    // Cancel SMS order on failure
+    if (smsOrder) {
+      try { await smsProvider.cancelOrder(smsOrder.orderId); } catch (e) {}
+    }
+    return res.status(500).json({ error: err.message, method: "auto-sms" });
+  }
+});
+
+// ── SMS Provider Balance ─────────────────────────────────────────────────
+app.get("/api/sms/balance", requireAuth, async (req, res) => {
+  try {
+    const balance = await smsProvider.getBalance();
+    res.json(balance);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

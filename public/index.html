@@ -273,6 +273,12 @@
           🌐 Pay via Browser (Puppeteer)
         </button>
 
+        <!-- GoPay Auto-SMS Payment Button (NEW) -->
+        <button class="btn btn-gopay" id="btnAutoSms" onclick="doAutoSmsGopay()" style="margin-top:8px; background:linear-gradient(135deg,#f59e0b,#d97706); width:100%;">
+          <span id="autoSmsSpinner" class="spinner hidden"></span>
+          📱 Auto Pay via SMS (Direct API)
+        </button>
+
         <!-- GoPay Result -->
         <div id="gopayActivateResult" class="hidden" style="margin-top:10px; padding:10px; border-radius:8px; font-size:13px;"></div>
 
