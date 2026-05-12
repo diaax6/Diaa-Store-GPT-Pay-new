@@ -250,6 +250,106 @@ function extractOTP(text) {
   return m ? m[1] : null;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// Smart SMS Flow — Auto-retry, multi-OTP, background cancel
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Schedule background cancellation of a number after delay.
+ * Waits for minActivationTime (2 min) then cancels → refund.
+ */
+function scheduleCancelInBackground(orderId, delayMs = 120000) {
+  log(`[Smart] Scheduling cancel of #${orderId} in ${delayMs / 1000}s (background)...`);
+  setTimeout(async () => {
+    try {
+      await getProvider().cancelOrder(orderId);
+      log(`[Smart] ✅ Background cancel of #${orderId} successful → refund`);
+    } catch (e) {
+      log(`[Smart] ⚠️ Background cancel of #${orderId} failed: ${e.message}`);
+    }
+  }, delayMs);
+}
+
+/**
+ * Smart wait for SMS with auto-retry:
+ * - Polls for SMS for `firstTimeout` ms (default 60s)
+ * - If no SMS → buys new number, schedules cancel of old one
+ * - Repeats up to `maxRetries` times
+ * Returns: { orderId, phone, code, text }
+ */
+async function smartWaitForSMS(orderId, { firstTimeout = 60000, retryTimeout = 90000, maxRetries = 3 } = {}) {
+  const provider = getProvider();
+  let currentOrderId = orderId;
+  let currentPhone = null;
+  let attempt = 0;
+
+  while (attempt <= maxRetries) {
+    const timeout = attempt === 0 ? firstTimeout : retryTimeout;
+    log(`[Smart] Attempt ${attempt + 1}/${maxRetries + 1}: Polling #${currentOrderId} for ${timeout / 1000}s...`);
+
+    try {
+      const result = await provider.waitForSMS(currentOrderId, timeout);
+      const code = result.code || extractOTP(result.text);
+      if (code) {
+        log(`[Smart] ✅ Got code: ${code} on #${currentOrderId}`);
+        return { orderId: currentOrderId, phone: currentPhone, code, text: result.text };
+      }
+    } catch (e) {
+      // Timeout or cancel — try new number
+      log(`[Smart] ❌ No SMS on #${currentOrderId}: ${e.message}`);
+    }
+
+    // Buy new number and cancel old one in background
+    attempt++;
+    if (attempt > maxRetries) {
+      throw new Error(`No SMS after ${maxRetries + 1} attempts`);
+    }
+
+    log(`[Smart] 🔄 Buying new number (attempt ${attempt + 1})...`);
+    // Schedule old number cancellation (2 min delay for API requirement)
+    scheduleCancelInBackground(currentOrderId, 120000);
+
+    try {
+      const newOrder = await provider.buyNumber();
+      currentOrderId = newOrder.orderId;
+      currentPhone = newOrder.phone;
+      log(`[Smart] ✅ New number: ${currentPhone} (id: ${currentOrderId})`);
+    } catch (e) {
+      throw new Error(`Failed to buy replacement number: ${e.message}`);
+    }
+  }
+
+  throw new Error("Smart SMS: exhausted all retries");
+}
+
+/**
+ * Request another SMS on the same number (status=3).
+ * Use after receiving a code when you need more OTPs.
+ * Then poll again for the next code.
+ */
+async function requestMoreSMS(orderId) {
+  const provider = getProvider();
+  if (provider.resendSMS) {
+    await provider.resendSMS(orderId);
+    log(`[Smart] 📩 Requested more SMS on #${orderId}`);
+  } else {
+    log(`[Smart] ⚠️ Provider doesn't support resendSMS`);
+  }
+}
+
+/**
+ * Wait for next SMS after requesting more (status=3 + poll).
+ * Used for second/third OTP on same number.
+ */
+async function waitForNextSMS(orderId, timeoutMs = 90000) {
+  await requestMoreSMS(orderId);
+  const provider = getProvider();
+  log(`[Smart] Waiting for next SMS on #${orderId}...`);
+  const result = await provider.waitForSMS(orderId, timeoutMs);
+  const code = result.code || extractOTP(result.text);
+  return { orderId, code, text: result.text };
+}
+
 module.exports = {
   getProvider,
   extractOTP,
@@ -260,4 +360,9 @@ module.exports = {
   waitForSMS: (...args) => getProvider().waitForSMS(...args),
   finishOrder: (...args) => getProvider().finishOrder(...args),
   cancelOrder: (...args) => getProvider().cancelOrder(...args),
+  // Smart flow
+  smartWaitForSMS,
+  requestMoreSMS,
+  waitForNextSMS,
+  scheduleCancelInBackground,
 };

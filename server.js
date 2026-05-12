@@ -733,7 +733,7 @@ app.post("/api/gopay/browser", requireAuth, async (req, res) => {
 
 // ══════════════════════════════════════════════════════════════════════════
 // GoPay Auto-SMS — Full automated payment with virtual SMS numbers
-// Direct API + 5sim/hero-sms OTP (no Puppeteer, no WhatsApp)
+// Direct API + hero-sms OTP — Smart retry + multi-OTP support
 // ══════════════════════════════════════════════════════════════════════════
 app.post("/api/gopay/auto-sms", requireAuth, async (req, res) => {
   const { midtransUrl } = req.body;
@@ -750,12 +750,14 @@ app.post("/api/gopay/auto-sms", requireAuth, async (req, res) => {
   console.log(`${'═'.repeat(60)}\n`);
 
   let smsOrder = null;
+  let currentOrderId = null;
 
   try {
     // ── Step 1: Buy virtual number ─────────────────────────────────
     console.log("[Auto-SMS] Step 1: Buying virtual number...");
     smsOrder = await smsProvider.buyNumber();
-    console.log(`[Auto-SMS] Step 1: ✅ Got number: ${smsOrder.phone}`);
+    currentOrderId = smsOrder.orderId;
+    console.log(`[Auto-SMS] Step 1: ✅ Got number: ${smsOrder.phone} (id: ${currentOrderId})`);
 
     // Strip the + and country code for the phone number
     let phone = smsOrder.phone;
@@ -769,25 +771,31 @@ app.post("/api/gopay/auto-sms", requireAuth, async (req, res) => {
       midtransUrl,
       phone,
       pin,
-      null // No WhatsApp — we'll handle OTP manually
+      null // No WhatsApp — we'll handle OTP via SMS
     );
 
     console.log("[Auto-SMS] Step 2 result:", JSON.stringify(linkResult).substring(0, 300));
 
-    // ── Step 3: If OTP needed, get it from SMS ─────────────────────
+    // ── Step 3: If OTP needed, get it from SMS (smart retry) ───────
     if (linkResult.waitingForOTP && linkResult.referenceId) {
-      console.log("[Auto-SMS] Step 3: Waiting for OTP via SMS...");
+      console.log("[Auto-SMS] Step 3: Waiting for OTP via SMS (smart retry enabled)...");
 
-      // Wait for OTP SMS (up to 2 minutes)
-      const smsResult = await smsProvider.waitForSMS(smsOrder.orderId, 120000);
-      const otpCode = smsResult.code || smsProvider.extractOTP(smsResult.text);
+      // Smart wait: 60s first attempt, auto-buy new number if no SMS
+      const smsResult = await smsProvider.smartWaitForSMS(currentOrderId, {
+        firstTimeout: 60000,   // 60s for first attempt
+        retryTimeout: 90000,   // 90s for retry attempts
+        maxRetries: 3,         // Up to 3 retries (4 numbers total)
+      });
+
+      // Update current order ID (might have changed if retry happened)
+      currentOrderId = smsResult.orderId;
+      const otpCode = smsResult.code;
 
       if (!otpCode) {
         throw new Error("Could not extract OTP from SMS: " + smsResult.text);
       }
 
       console.log(`[Auto-SMS] Step 3: ✅ Got OTP: ${otpCode}`);
-      await smsProvider.finishOrder(smsOrder.orderId);
 
       // ── Step 4: Submit OTP + PIN ──────────────────────────────────
       console.log("[Auto-SMS] Step 4: Submitting OTP...");
@@ -799,50 +807,41 @@ app.post("/api/gopay/auto-sms", requireAuth, async (req, res) => {
 
       console.log("[Auto-SMS] Step 4 result:", JSON.stringify(otpResult).substring(0, 500));
 
-      // ── Step 5: If payment OTP needed, wait 60s then get from SMS ──
+      // ── Step 5: If payment OTP needed → request more SMS (status=3) ──
       if (otpResult.waitingForOTP && otpResult.isPayment && otpResult.referenceId) {
-        console.log("[Auto-SMS] Step 5: Payment requires OTP — waiting 60s for SMS...");
+        console.log("[Auto-SMS] Step 5: Payment requires OTP — requesting more SMS on same number...");
 
-        // Buy another number for payment OTP (or re-use)
-        let payOrder = null;
-        try {
-          payOrder = await smsProvider.buyNumber();
-          console.log(`[Auto-SMS] Step 5: New number for payment OTP: ${payOrder.phone}`);
-        } catch (e) {
-          console.log(`[Auto-SMS] Step 5: Re-buy failed, using same number`);
-        }
+        // Request another SMS on the SAME number (status=3)
+        const nextSMS = await smsProvider.waitForNextSMS(currentOrderId, 120000);
+        const payOTP = nextSMS.code;
 
-        // Wait 60 seconds as user mentioned
-        console.log("[Auto-SMS] Step 5: Waiting 60 seconds for payment SMS...");
-        await new Promise(r => setTimeout(r, 60000));
-
-        // Poll for payment OTP
-        const payOrderId = payOrder ? payOrder.orderId : smsOrder.orderId;
-        const paySMS = await smsProvider.waitForSMS(payOrderId, 120000);
-        const payOTP = paySMS.code || smsProvider.extractOTP(paySMS.text);
-
-        if (!payOTP) throw new Error("Could not get payment OTP: " + paySMS.text);
+        if (!payOTP) throw new Error("Could not get payment OTP: " + nextSMS.text);
 
         console.log(`[Auto-SMS] Step 5: ✅ Payment OTP: ${payOTP}`);
-        if (payOrder) await smsProvider.finishOrder(payOrder.orderId);
 
         // Submit payment OTP
         const payResult = await continueWithOTP(otpResult.referenceId, payOTP, pin);
         console.log("[Auto-SMS] Step 5 result:", JSON.stringify(payResult).substring(0, 300));
+
+        // Finish order (status=6)
+        await smsProvider.finishOrder(currentOrderId);
         return res.json({ ...payResult, method: "auto-sms", phone: smsOrder.phone });
       }
 
+      // No payment OTP needed — finish order
+      await smsProvider.finishOrder(currentOrderId);
       return res.json({ ...otpResult, method: "auto-sms", phone: smsOrder.phone });
     }
 
     // If linking succeeded without OTP (already linked)
+    await smsProvider.finishOrder(currentOrderId);
     return res.json({ ...linkResult, method: "auto-sms", phone: smsOrder.phone });
 
   } catch (err) {
     console.error("[Auto-SMS] ERROR:", err.message);
-    // Cancel SMS order on failure
-    if (smsOrder) {
-      try { await smsProvider.cancelOrder(smsOrder.orderId); } catch (e) {}
+    // Cancel current SMS order on failure (schedule background cancel for 2min rule)
+    if (currentOrderId) {
+      smsProvider.scheduleCancelInBackground(currentOrderId, 120000);
     }
     return res.status(500).json({ error: err.message, method: "auto-sms" });
   }
